@@ -37,7 +37,9 @@ def get_mla_impl(
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        supported = impl.support(attn_configs, attn_inputs)
+        logging.debug(f"FMHA impl {impl.__name__} support={supported}, is_prefill={attn_inputs.is_prefill}, kv_cache={attn_inputs.kv_cache}")
+        if not supported:
             continue
 
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
@@ -159,7 +161,9 @@ def get_fmha_impl(
             continue
 
         # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        supported = impl.support(attn_configs, attn_inputs)
+        logging.debug(f"FMHA impl {impl.__name__} support={supported}, is_prefill={attn_inputs.is_prefill}, kv_cache={attn_inputs.kv_cache}")
+        if not supported:
             continue
 
         # Check if implementation supports parallelism config

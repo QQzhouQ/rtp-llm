@@ -71,7 +71,12 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
+    ] + select({
+        "@//:using_ascend": [
+            "@torch_npu_ascend//:torch_npu_api",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(

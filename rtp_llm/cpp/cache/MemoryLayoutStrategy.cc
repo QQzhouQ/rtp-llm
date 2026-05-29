@@ -3,7 +3,17 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 
+#if USING_ASCEND
+#include <torch_npu/csrc/aten/common/from_blob.h>
+#endif
+
 namespace rtp_llm {
+
+#if USING_ASCEND
+#define CACHE_FROM_BLOB at_npu::native::from_blob
+#else
+#define CACHE_FROM_BLOB torch::from_blob
+#endif
 
 // Initialization function
 bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
@@ -46,18 +56,38 @@ void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
 // Tensor processing functions
 void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     const size_t kv_elem_size          = rtp_llm::getTypeSize(data_type_);
-    const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
-    const size_t layer_block_bytes     = config_.block_num * config_.kv_block_stride_bytes;
+    size_t       kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
+    if (separate_kv_cache_) {
+        kv_block_stride_elems = config_.k_block_stride_bytes / kv_elem_size;
+    }
 
     auto kv_options = torch::TensorOptions()
                           .dtype(dataTypeToTorchType(data_type_))
                           .device(kv_cache_tensor.device())
                           .requires_grad(false);
-
-    kv_cache_tensor.fill_(0);
+    const int64_t kv_total_bytes = static_cast<int64_t>(kv_cache_tensor.nbytes());
+    const int64_t kv_typed_numel = static_cast<int64_t>(static_cast<size_t>(kv_total_bytes) / kv_elem_size);
 
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
+
+    if (separate_kv_cache_) {
+        const int64_t layer_num  = static_cast<int64_t>(config_.layer_num);
+        const int64_t block_num  = static_cast<int64_t>(config_.block_num);
+        const int64_t stride     = static_cast<int64_t>(kv_block_stride_elems);
+        const size_t  layer_bytes = static_cast<size_t>(block_num) * kv_block_stride_elems * kv_elem_size;
+        char*         base_ptr    = static_cast<char*>(kv_cache_tensor.data_ptr());
+
+        for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            void* layer_ptr = base_ptr + layer_id * layer_bytes;
+            auto   layer_tensor = CACHE_FROM_BLOB(
+                layer_ptr, {block_num, stride}, kv_options);
+            layer_kv_tensors_.push_back(layer_tensor);
+        }
+        return;
+    }
+
+    torch::Tensor kv_cache_typed = CACHE_FROM_BLOB(kv_cache_tensor.data_ptr(), {kv_typed_numel}, kv_options);
 
     if (config_.use_mla && config_.seq_size_per_block > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % config_.seq_size_per_block == 0,
@@ -65,6 +95,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                                 kv_block_stride_elems,
                                 config_.seq_size_per_block);
         const size_t stride_elems = kv_block_stride_elems / config_.seq_size_per_block;
+        const size_t layer_block_bytes = config_.block_num * config_.kv_block_stride_bytes;
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_cache_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;
@@ -79,6 +110,11 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
     } else {
+        torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                static_cast<int64_t>(config_.block_num),
+                                                                static_cast<int64_t>(kv_block_stride_elems)});
+        clearKVTensor(reshaped_tensor);
+        const size_t layer_block_bytes = config_.block_num * config_.kv_block_stride_bytes;
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_cache_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;
@@ -109,10 +145,26 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
                             static_cast<size_t>(kv_scale_tensor.nbytes()),
                             config_.kv_scale_pool_size_bytes);
 
-    layer_kv_scale_tensors_.clear();
-    layer_kv_scale_tensors_.reserve(config_.layer_num);
+    if (separate_kv_cache_) {
+        const int64_t layer_num = static_cast<int64_t>(config_.layer_num);
+        const int64_t block_num = static_cast<int64_t>(config_.block_num);
+        const size_t  scale_elem_size = sizeof(float);
+        const size_t  scale_stride_elems = config_.kv_scale_stride_bytes / scale_elem_size;
+        const size_t  layer_scale_bytes = static_cast<size_t>(block_num) * scale_stride_elems * scale_elem_size;
+        auto          scale_options =
+            torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_tensor.device()).requires_grad(false);
+        char* base_ptr = static_cast<char*>(kv_scale_tensor.data_ptr());
 
-    clearKVTensor(kv_scale_tensor);
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
+        for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            void* layer_ptr = base_ptr + layer_id * layer_scale_bytes;
+            auto  layer_tensor = CACHE_FROM_BLOB(
+                layer_ptr, {block_num, static_cast<int64_t>(scale_stride_elems)}, scale_options);
+            layer_kv_scale_tensors_.push_back(layer_tensor);
+        }
+        return true;
+    }
 
     if (config_.is_mla) {
         RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0, "seq_size_per_block must be > 0 for MLA scale");
@@ -125,6 +177,16 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         const size_t layer_block_bytes     = config_.block_num * config_.seq_size_per_block * scale_bytes_per_token;
         auto         scale_options =
             torch::TensorOptions().dtype(torch::kUInt8).device(kv_scale_tensor.device()).requires_grad(false);
+        torch::Tensor kv_scale_typed = CACHE_FROM_BLOB(
+            kv_scale_tensor.data_ptr(), {static_cast<int64_t>(config_.kv_scale_pool_size_bytes)}, scale_options);
+        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                      static_cast<int64_t>(config_.block_num),
+                                                                      static_cast<int64_t>(config_.seq_size_per_block),
+                                                                      static_cast<int64_t>(scale_bytes_per_token)});
+        reshaped_scale_tensor.fill_(0);
+
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_scale_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;
@@ -152,6 +214,16 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         const size_t layer_block_bytes  = config_.block_num * config_.kv_scale_stride_bytes;
         auto         scale_options =
             torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_tensor.device()).requires_grad(false);
+        const int64_t scale_total_bytes = static_cast<int64_t>(kv_scale_tensor.nbytes());
+        const int64_t scale_typed_numel = static_cast<int64_t>(static_cast<size_t>(scale_total_bytes) / sizeof(float));
+        torch::Tensor kv_scale_typed = CACHE_FROM_BLOB(kv_scale_tensor.data_ptr(), {scale_typed_numel}, scale_options);
+        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                      static_cast<int64_t>(config_.block_num),
+                                                                      static_cast<int64_t>(scale_stride_elems)});
+        clearScaleTensor(reshaped_scale_tensor);
+
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_tensors_.reserve(config_.layer_num);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_scale_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;

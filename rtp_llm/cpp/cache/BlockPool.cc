@@ -5,6 +5,10 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+
+#if USING_ASCEND
+#include <torch_npu/csrc/aten/common/from_blob.h>
+#endif
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -58,9 +62,20 @@ void BlockPool::initializeCacheBuffer() {
     auto options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
 
     if (separate_kv_cache_) {
-        size_t per_buffer_bytes = config_.total_size_bytes / 2;
-        k_cache_buffer_ = torch::empty({static_cast<int64_t>(per_buffer_bytes)}, options);
-        v_cache_buffer_ = torch::empty({static_cast<int64_t>(per_buffer_bytes)}, options);
+        size_t k_buffer_bytes = 0;
+        size_t v_buffer_bytes = 0;
+        for (const auto& layout_cfg : config_.memory_layouts) {
+            k_buffer_bytes += layout_cfg.k_pool_size_bytes + layout_cfg.kv_scale_pool_size_bytes;
+            v_buffer_bytes += layout_cfg.v_pool_size_bytes;
+        }
+        if (k_buffer_bytes == 0) {
+            k_buffer_bytes = config_.total_size_bytes / 2;
+        }
+        if (v_buffer_bytes == 0) {
+            v_buffer_bytes = config_.total_size_bytes / 2;
+        }
+        k_cache_buffer_ = torch::empty({static_cast<int64_t>(k_buffer_bytes)}, options);
+        v_cache_buffer_ = torch::empty({static_cast<int64_t>(v_buffer_bytes)}, options);
         if (allocation_type_ == AllocationType::HOST) {
             k_cache_buffer_ = k_cache_buffer_.pin_memory();
             v_cache_buffer_ = v_cache_buffer_.pin_memory();
@@ -209,7 +224,11 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
                                      .dtype(k_layer_tensor.dtype())
                                      .device(v_cache_buffer_.device())
                                      .requires_grad(false);
+                #if USING_ASCEND
+                auto v_view = at_npu::native::from_blob(v_ptr, k_layer_tensor.sizes(), k_layer_tensor.strides(), v_options);
+#else
                 auto v_view = torch::from_blob(v_ptr, k_layer_tensor.sizes(), k_layer_tensor.strides(), v_options);
+#endif
                 global_layer_v_tensors_[global_layer] = v_view;
             }
         }

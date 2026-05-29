@@ -285,15 +285,105 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 #elif USING_ASCEND
 
 // ============================================================
-// Sample ops (Ascend) — stub implementations
+// Sample ops (Ascend) — pure PyTorch fallback implementations
 // ============================================================
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    const auto batch_size        = params.logits.size(0);
+    const auto vocab_size_padded = params.logits.size(1);
+    const auto step              = params.step;
+    const auto orig_device       = params.logits.device();
+
+    auto device_tokens     = params.token_ids.to(orig_device);
+    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    auto top_k_ptr         = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    auto top_p_ptr         = params.top_p.data_ptr<float>();
+
+    // Move logits to CPU for sampling to avoid NPU op compatibility issues
+    auto logits = params.logits.to(torch::kCPU);
+
+    // 1. Apply temperature on CPU
+    if (params.temperature.defined()) {
+        auto temp = params.temperature.to(torch::kCPU);
+        bool any_non_one = false;
+        for (int64_t i = 0; i < batch_size; i++) {
+            if (temp.data_ptr<float>()[i] != 1.0f) { any_non_one = true; break; }
+        }
+        if (any_non_one) { logits = logits / temp.unsqueeze(1); }
+    }
+
+    // 2. Fast path: top_k=1 -> argmax
+    bool all_topk1 = true;
+    for (int64_t i = 0; i < batch_size; i++) {
+        if (top_k_ptr[i] != 1) { all_topk1 = false; break; }
+    }
+
+    torch::Tensor selected_tokens;
+
+    if (all_topk1 && !params.output_all_probs.has_value()) {
+        selected_tokens = torch::argmax(logits, -1, false);
+    } else {
+        // 3. softmax + top_k/top_p filtering + multinomial sampling on CPU
+        auto probs = torch::softmax(logits, -1);
+
+        if (all_topk1) {
+            selected_tokens = torch::argmax(probs, -1, false);
+        } else {
+            auto filtered = probs.clone();
+            for (int64_t b = 0; b < batch_size; b++) {
+                int k = top_k_ptr[b] <= 0 ? vocab_size_padded : top_k_ptr[b];
+                if ((int64_t)k < vocab_size_padded) {
+                    auto row = filtered[b];
+                    auto result = row.topk(k);
+                    auto min_val = std::get<0>(result)[-1];
+                    row.masked_fill_(row < min_val, 0.0f);
+                }
+            }
+            for (int64_t b = 0; b < batch_size; b++) {
+                float p = top_p_ptr[b];
+                if (std::abs(p - 1.0f) >= 1e-7 && p > 0.0f) {
+                    auto row = filtered[b];
+                    auto sort_result = row.sort(0, true);
+                    auto sorted_probs = std::get<0>(sort_result);
+                    auto sorted_indices = std::get<1>(sort_result);
+                    auto cumsum = sorted_probs.cumsum(0);
+                    auto mask = cumsum - sorted_probs > p;
+                    sorted_probs.masked_fill_(mask, 0.0f);
+                    row.scatter_(0, sorted_indices, sorted_probs);
+                }
+            }
+            filtered = filtered.clamp_min(0.0f);
+            auto row_sums = filtered.sum(-1, true);
+            filtered = filtered / row_sums.clamp_min(1e-10);
+            filtered = filtered.nan_to_num(0.0f);
+            selected_tokens = torch::multinomial(filtered, 1, false).squeeze(-1);
+            if (params.output_all_probs.has_value()) {
+                params.output_all_probs.value().copy_(filtered.to(orig_device));
+            }
+        }
+
+        // 4. cum_log_probs on CPU
+        if (params.cum_log_probs.has_value()) {
+            auto log_probs = torch::log_softmax(logits, -1);
+            auto sel_idx = selected_tokens.unsqueeze(1);
+            auto token_log_probs = log_probs.gather(1, sel_idx).squeeze(1);
+            params.cum_log_probs.value().add_(token_log_probs.to(orig_device));
+        }
+    }
+
+    // Copy selected tokens back to original device and update token_ids
+    auto selected_on_device = selected_tokens.to(orig_device);
+    transposed_tokens[transposed_tokens.size(0) - 1].copy_(selected_on_device);
+    params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+
+    return GreedyOutput{};
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    params.output_token_ids_d.copy_(params.draft_token_ids_d);
+    auto draft_len = params.draft_probs_d.size(1);
+    params.output_accepted_token_num_d.fill_(draft_len);
+    params.output_emitted_token_num_d.fill_(draft_len);
 }
 
 #else  // !USING_CUDA — ROCm platform

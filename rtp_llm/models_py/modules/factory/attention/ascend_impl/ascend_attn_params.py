@@ -28,6 +28,8 @@ def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     params = AscendAttnParams()
 
     params.block_table = attn_inputs.kv_cache_block_id_host
+    if params.block_table is not None and params.block_table.ndim != 2:
+        params.block_table = params.block_table.reshape(-1, params.block_table.shape[-1])
 
     if attn_inputs.sequence_lengths.numel() > 0:
         params.seq_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
@@ -91,11 +93,21 @@ def compute_ascend_attn_params(attn_inputs):
 
     if (block_table is not None and block_table.numel() > 0
             and positions.numel() > 0):
+        if block_table.ndim != 2:
+            block_table = block_table.reshape(-1, block_table.shape[-1])
         max_blocks = block_table.shape[1]
         block_index = positions // page_size
         if max_blocks > 0:
             block_index = block_index.clamp(max=max_blocks - 1)
         block_offset = positions % page_size
+        if not hasattr(compute_ascend_attn_params, '_logged'):
+            import logging
+            logging.warning(
+                f"[ATTN_PARAMS] prefill={is_prefill} pos={positions.shape} "
+                f"batch_ids={batch_ids.shape} bt={block_table.shape} "
+                f"bi={block_index.shape} ps={page_size}"
+            )
+            compute_ascend_attn_params._logged = True
         slot_block_numbers = block_table[batch_ids, block_index]
         slot_block_numbers = slot_block_numbers.clamp(min=0)  # replace -1 with 0
         slot_mapping = (slot_block_numbers * page_size + block_offset).to(torch.int64)

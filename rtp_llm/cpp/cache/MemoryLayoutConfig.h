@@ -20,6 +20,10 @@ struct MemoryLayoutConfig {
     size_t kv_scale_pool_size_bytes = 0;
     size_t total_size_bytes         = 0;
 
+    // ---- Separate K/V pool sizes (Ascend NPU) ----
+    size_t k_pool_size_bytes = 0;
+    size_t v_pool_size_bytes = 0;
+
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;

@@ -1,0 +1,653 @@
+[2026-05-29 03:28:50.079470] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/common/InitEngineOps.cc:19][void rtp_llm::initEngine(std::string)] install sighandler begin
+[2026-05-29 03:28:50.079539] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/common/InitEngineOps.cc:24][void rtp_llm::initEngine(std::string)] install sighandler success
+[2026-05-29 03:28:50.080593] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:122][void rtp_llm::EngineInitParams::showDebugInfo() const] ModelConfig: max_seq_len=8192, vocab_size=151936
+[2026-05-29 03:28:50.080623] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:124][void rtp_llm::EngineInitParams::showDebugInfo() const] ParallelismConfig: tp_size=1, ep_size=1, dp_size=1
+[2026-05-29 03:28:50.080666] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:128][void rtp_llm::EngineInitParams::showDebugInfo() const] RuntimeConfig: max_generate_batch_size: 32
+max_block_size_per_item: 16
+reserve_runtime_mem_mb: 1024
+warm_up: 1
+warm_up_with_loss: 0
+use_batch_decode_scheduler: 0
+batch_decode_scheduler_config: {
+batch_decode_scheduler_batch_size: 1
+batch_decode_scheduler_warmup_type: 0
+}
+fifo_scheduler_config: {
+max_context_batch_size: 1
+max_batch_tokens_size: 8192
+}
+model_name: QwenV3
+worker_grpc_addrs: [175.99.1.3:9001]
+worker_addrs: [175.99.1.3:9002:9004]
+specify_gpu_arch: 
+[2026-05-29 03:28:50.080712] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/metrics/RtpLLMMetrics.cc:802][bool rtp_llm::initKmonitorFactory()] set kmonitor normal sample period [1] seconds.
+[2026-05-29 03:28:50.080748] [INFO] [797669:797669] set global level config [period: 1 2 5 10 30 60]
+[2026-05-29 03:28:50.080809] [INFO] [797669:797669] assgin config object success
+[2026-05-29 03:28:50.080873] [INFO] [797669:797669] source size [1] ,add name[buildinmetric]
+[2026-05-29 03:28:50.080888] [INFO] [797669:797669] register build metrics prefix [] tags [hippo_app=default hippo_cluster=default hippo_slave_ip=127.0.0.1 hippo_work_dir=default host=175.99.1.3 kmon_service_name=]
+[2026-05-29 03:28:50.080921] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/metrics/RtpLLMMetrics.cc:832][bool rtp_llm::initKmonitorFactory()] KMonitorFactory::registerBuildInMetrics() finished
+[2026-05-29 03:28:50.080952] [INFO] [797669:797669] enable flume sink
+[2026-05-29 03:28:50.080962] [INFO] [797669:797669] disable output metrics to log file
+[2026-05-29 03:28:50.080988] [INFO] [797669:797669] kmon agent init success, address is [127.0.0.1:4141], ip is [127.0.0.1], port is [4141]
+[2026-05-29 03:28:50.081247] [INFO] [797669:797669] sample metrics thread started
+[2026-05-29 03:28:50.081262] [INFO] [797669:797669] timer started
+[2026-05-29 03:28:50.081272] [INFO] [797669:797669] register build metrics prefix [] tags [hippo_app=default hippo_cluster=default hippo_slave_ip=127.0.0.1 hippo_work_dir=default host=175.99.1.3 kmon_service_name=]
+[2026-05-29 03:28:50.081284] [INFO] [797669:797669] kmonitor worker started
+[2026-05-29 03:28:50.081289] [INFO] [797669:797669] kmonitor factory started
+[2026-05-29 03:28:50.081298] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/metrics/RtpLLMMetrics.cc:835][bool rtp_llm::initKmonitorFactory()] KMonitorFactory::Start() finished
+[2026-05-29 03:28:50.081323] [INFO] [797669:797669] source size [2] ,add name[_1_reporter]
+[2026-05-29 03:28:50.081345] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:122][void rtp_llm::RtpLLMOp::init(pybind11::object, pybind11::object, pybind11::object, pybind11::object, pybind11::object, pybind11::object)] init engine params success
+[2026-05-29 03:28:50.081354] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:122][void rtp_llm::EngineInitParams::showDebugInfo() const] ModelConfig: max_seq_len=8192, vocab_size=151936
+[2026-05-29 03:28:50.081361] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:124][void rtp_llm::EngineInitParams::showDebugInfo() const] ParallelismConfig: tp_size=1, ep_size=1, dp_size=1
+[2026-05-29 03:28:50.081384] [INFO] [797669:797669] [RANK 0][175.99.1.3][./rtp_llm/cpp/engine_base/EngineInitParams.h:128][void rtp_llm::EngineInitParams::showDebugInfo() const] RuntimeConfig: max_generate_batch_size: 32
+max_block_size_per_item: 16
+reserve_runtime_mem_mb: 1024
+warm_up: 1
+warm_up_with_loss: 0
+use_batch_decode_scheduler: 0
+batch_decode_scheduler_config: {
+batch_decode_scheduler_batch_size: 1
+batch_decode_scheduler_warmup_type: 0
+}
+fifo_scheduler_config: {
+max_context_batch_size: 1
+max_batch_tokens_size: 8192
+}
+model_name: QwenV3
+worker_grpc_addrs: [175.99.1.3:9001]
+worker_addrs: [175.99.1.3:9002:9004]
+specify_gpu_arch: 
+[2026-05-29 03:28:50.082223] [INFO] [797669:799214] thread started for name[KmonReport]
+[2026-05-29 03:28:50.082242] [INFO] [797669:799215] thread started for name[KmonSend]
+[2026-05-29 03:28:50.082290] [INFO] [797669:799215] loop started for thread[KmonSend] loopInterval[100000]
+[2026-05-29 03:28:50.082275] [INFO] [797669:799214] loop started for thread[KmonReport] loopInterval[100000]
+[2026-05-29 03:28:50.082817] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/model_rpc/LocalRpcServer.cc:24][virtual grpc::Status rtp_llm::LocalRpcServer::init(const rtp_llm::EngineInitParams&, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] LocalRpcServer aux_string 
+[2026-05-29 03:28:50.082857] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/models_py/bindings/core/ExecOps.cc:619][rtp_llm::initRuntime(size_t, bool, bool, rtp_llm::MlaOpsType)::<lambda()>] Initialize runtime (Ascend). device_id=0
+[2026-05-29 03:28:50.082925] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/models_py/bindings/core/ExecOps.cc:630][rtp_llm::initRuntime(size_t, bool, bool, rtp_llm::MlaOpsType)::<lambda()>] Runtime init done (communication via c10d ProcessGroup)
+[2026-05-29 03:28:50.082940] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/models_py/bindings/core/ExecOps.cc:633][rtp_llm::MlaOpsType rtp_llm::initRuntime(size_t, bool, bool, rtp_llm::MlaOpsType)] init devices done
+[2026-05-29 03:28:50.083137] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:65][rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)
+[2026-05-29 03:28:50.083193] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:70][rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] Ascend NormalEngine ctor: set device to 0
+[2026-05-29 03:28:50.083203] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:101][rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] skip warm up on non-CUDA platform.
+[2026-05-29 03:28:50.083853] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryEvaluationHelper.cc:53][static size_t rtp_llm::MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const rtp_llm::RuntimeConfig&, const rtp_llm::ParallelismConfig&, const rtp_llm::ModelConfig&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] RuntimeConfig has reserve_runtime_mem_mb=1024
+[2026-05-29 03:28:50.084308] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryEvaluationHelper.cc:71][static size_t rtp_llm::MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const rtp_llm::RuntimeConfig&, const rtp_llm::ParallelismConfig&, const rtp_llm::ModelConfig&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] tp_size 1 needs at least 3121 MiB memory for runtime by default, but only 1024 MiB reserved memory set by config. adjust to minimal value.
+[2026-05-29 03:28:50.084327] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryEvaluationHelper.cc:130][static size_t rtp_llm::MemoryEvaluationHelper::getKVCacheMemorySize(const rtp_llm::RuntimeConfig&, const rtp_llm::KVCacheConfig&, const rtp_llm::ModelConfig&, const rtp_llm::ParallelismConfig&, const std::optional<rtp_llm::WarmUpResult>&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] warm up result not available, use default runtime memory size 3121 MiB
+[2026-05-29 03:28:50.084348] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryEvaluationHelper.cc:136][static size_t rtp_llm::MemoryEvaluationHelper::getKVCacheMemorySize(const rtp_llm::RuntimeConfig&, const rtp_llm::KVCacheConfig&, const rtp_llm::ModelConfig&, const rtp_llm::ParallelismConfig&, const std::optional<rtp_llm::WarmUpResult>&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] sampler needs 148 MiB memory, model runtime needs 3121 MiB memory, take max value.
+[2026-05-29 03:28:50.084358] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryEvaluationHelper.cc:147][static size_t rtp_llm::MemoryEvaluationHelper::getKVCacheMemorySize(const rtp_llm::RuntimeConfig&, const rtp_llm::KVCacheConfig&, const rtp_llm::ModelConfig&, const rtp_llm::ParallelismConfig&, const std::optional<rtp_llm::WarmUpResult>&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] cache config final decided kv cache memory size 57009 MiB
+[2026-05-29 03:28:50.084369] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/CacheConfigCreator.cc:60][static rtp_llm::CacheConfig rtp_llm::CacheConfigCreator::createConfig(const rtp_llm::ModelConfig&, const rtp_llm::ParallelismConfig&, const rtp_llm::RuntimeConfig&, const rtp_llm::KVCacheConfig&, const std::optional<rtp_llm::WarmUpResult>&, const std::optional<rtp_llm::SpeculativeExecutionConfig>&)] kv cache block nums is 8144, allows storing 521216 tokens
+[2026-05-29 03:28:50.084429] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:332][void rtp_llm::NormalEngine::initCacheManager(std::optional<rtp_llm::WarmUpResult>)] create cache manager with config CacheConfig{
+  # Model Configuration:
+  dtype=14
+  layer_num=28
+  layer_all_num=28
+  use_mla=false
+
+  # Block Configuration:
+  block_num=8144
+  seq_size_per_block=64
+  kernel_seq_size_per_block=64
+
+  # Block Sizing Information:
+  separate_kv_cache=1
+  kv_block_size_bytes=7340032
+  kv_scale_size_bytes=0
+  block_size_bytes=7340032
+  kv_block_stride_bytes=262144
+  kv_scale_stride_bytes=0
+  k_block_stride_bytes=131072
+  v_block_stride_bytes=131072
+
+  # Attention Configuration:
+  linear_step=1
+  group_layer_num=28
+  linear_group_num=0
+  full_group_num=0
+
+  # Cache Specifications:
+  cache_specs.size()=1
+  cache_specs[0] {
+    type=MultiHeadAttention(0)
+    dtype=14
+    layer_num=1
+    local_head_num_kv=8
+    seq_size_per_block=64
+    block_size=131072
+    k_block_size=65536
+    v_block_size=65536
+    block_size_bytes=262144
+    k_block_size_bytes=131072
+    v_block_size_bytes=131072
+    size_per_head=128
+    scale_size_per_block=0
+    scale_size_bytes_per_block=0
+    scale_block_size_bytes=0
+    k_scale_block_size_bytes=0
+    v_scale_block_size_bytes=0
+  }
+
+  # Layer Mapping:
+  global_layer_ids.size()=1
+  global_layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  layer_ids.size()=1
+  layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  group_types.size()=1
+  group_types=[1]
+  layer_attn_types.size()=28
+  layer_attn_types=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+
+  # MTP Configurations:
+  mtp_sub_configs.size()=0
+
+}
+
+[2026-05-29 03:28:50.084443] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:333][void rtp_llm::NormalEngine::initCacheManager(std::optional<rtp_llm::WarmUpResult>)] create cache manager with block nums 8144, block size 7168 KB
+[2026-05-29 03:28:50.084450] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:336][void rtp_llm::NormalEngine::initCacheManager(std::optional<rtp_llm::WarmUpResult>)] create cache manager with linear step 1
+[2026-05-29 03:28:50.084473] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/KVCacheManager.cc:566][void rtp_llm::KVCacheManager::allocateAndSync()] block_num is 8144 after tp sync
+[2026-05-29 03:28:50.084484] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/KVCacheManager.cc:43][rtp_llm::KVCacheManager::KVCacheManager(const rtp_llm::CacheConfig&, bool, kmonitor::MetricsReporterPtr, const rtp_llm::KVCacheConfig&, const rtp_llm::ParallelismConfig&, const rtp_llm::RuntimeConfig&, const rtp_llm::SpeculativeExecutionConfig&, const rtp_llm::PDSepConfig&, const rtp_llm::CacheStoreConfig&)] cache config: layer_num=28, block_num=8144, block_size=7340032B, seq_size_per_block=64
+[2026-05-29 03:28:50.084516] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/cache/BlockPoolConfigHelper.h:37][static rtp_llm::BlockPoolConfig rtp_llm::BlockPoolConfigHelper::createConfig(const rtp_llm::CacheConfig&)] main_layout.kv_scale_offset_bytes: 29888610304
+[2026-05-29 03:28:50.084525] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/cache/BlockPoolConfigHelper.h:38][static rtp_llm::BlockPoolConfig rtp_llm::BlockPoolConfigHelper::createConfig(const rtp_llm::CacheConfig&)] main_layout.kv_scale_pool_size_bytes: 0
+[2026-05-29 03:28:50.084535] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/cache/BlockPoolConfigHelper.h:83][static rtp_llm::BlockPoolConfig rtp_llm::BlockPoolConfigHelper::createConfig(const rtp_llm::CacheConfig&)] BlockPoolConfig(memory_layouts=1): total_size=59777220608 bytes, separate_kv_cache=1
+[2026-05-29 03:28:50.774401] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/MemoryLayoutStrategy.cc:37][bool rtp_llm::MemoryLayoutStrategy::init(const rtp_llm::MemoryLayoutConfig&, at::Tensor&, at::Tensor&, void*, bool, void*)] MemoryLayoutStrategy initialized successfully
+[2026-05-29 03:28:50.774484] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/BlockPool.cc:146][void rtp_llm::BlockPool::processMemoryLayout(size_t, const at::Tensor&, size_t&)] MemoryLayout[0] initialized: layer_num=28 block_num=8144 kv_off=0 kv_bytes=29888610304 scale_off=29888610304 scale_bytes=0
+[2026-05-29 03:28:50.776911] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/BlockPool.cc:258][bool rtp_llm::BlockPool::init()] BlockPool init success: memory_layouts=1, total_layers=28, total_size=59777220608 bytes
+[2026-05-29 03:28:50.776956] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.cc:61][virtual bool rtp_llm::SingleTypeKVCacheAllocator::doInit()] SingleTypeKVCacheAllocator initialized successfully
+[2026-05-29 03:28:50.776972] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/KVCacheAllocator.cc:25][bool rtp_llm::KVCacheAllocator::init()] KVCacheAllocator set reserve blocks: ratio=5% reserve_blocks=407 available_blocks=8143
+[2026-05-29 03:28:50.777206] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/KVCacheManager.cc:530][void rtp_llm::KVCacheManager::initConnectorCoordinator()] init connector coordinator, cache config: [CacheConfig{
+  # Model Configuration:
+  dtype=14
+  layer_num=28
+  layer_all_num=28
+  use_mla=false
+
+  # Block Configuration:
+  block_num=8144
+  seq_size_per_block=64
+  kernel_seq_size_per_block=64
+
+  # Block Sizing Information:
+  separate_kv_cache=1
+  kv_block_size_bytes=7340032
+  kv_scale_size_bytes=0
+  block_size_bytes=7340032
+  kv_block_stride_bytes=262144
+  kv_scale_stride_bytes=0
+  k_block_stride_bytes=131072
+  v_block_stride_bytes=131072
+
+  # Attention Configuration:
+  linear_step=1
+  group_layer_num=28
+  linear_group_num=0
+  full_group_num=0
+
+  # Cache Specifications:
+  cache_specs.size()=1
+  cache_specs[0] {
+    type=MultiHeadAttention(0)
+    dtype=14
+    layer_num=1
+    local_head_num_kv=8
+    seq_size_per_block=64
+    block_size=131072
+    k_block_size=65536
+    v_block_size=65536
+    block_size_bytes=262144
+    k_block_size_bytes=131072
+    v_block_size_bytes=131072
+    size_per_head=128
+    scale_size_per_block=0
+    scale_size_bytes_per_block=0
+    scale_block_size_bytes=0
+    k_scale_block_size_bytes=0
+    v_scale_block_size_bytes=0
+  }
+
+  # Layer Mapping:
+  global_layer_ids.size()=1
+  global_layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  layer_ids.size()=1
+  layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  group_types.size()=1
+  group_types=[1]
+  layer_attn_types.size()=28
+  layer_attn_types=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+
+  # MTP Configurations:
+  mtp_sub_configs.size()=0
+
+}
+], kv cache config: [reuse_cache: 0
+multi_task_prompt: 
+multi_task_prompt_str: 
+multi_task_prompt_tokens: empty
+reserve_block_ratio: 5
+max_block_size_per_item: 16
+memory_cache_size_mb: 0
+memory_cache_sync_timeout_ms: 10000
+linear_step: 1
+separate_kv_cache: 1
+int8_kv_cache: 0
+fp8_kv_cache: 0
+ssm_state_dtype: bf16
+kv_cache_mem_mb: -1
+seq_size_per_block: 64
+kernel_seq_size_per_block: 0
+test_block_num: 0
+use_block_cache: -1
+enable_device_cache: 1
+enable_memory_cache: 0
+enable_remote_cache: 0
+write_cache_sync: 0
+enable_tiered_memory_cache: 0
+device_cache_min_free_blocks: 0
+load_cache_retry_times: 1
+], runtime config: [max_generate_batch_size: 32
+max_block_size_per_item: 16
+reserve_runtime_mem_mb: 1024
+warm_up: 1
+warm_up_with_loss: 0
+use_batch_decode_scheduler: 0
+batch_decode_scheduler_config: {
+batch_decode_scheduler_batch_size: 1
+batch_decode_scheduler_warmup_type: 0
+}
+fifo_scheduler_config: {
+max_context_batch_size: 1
+max_batch_tokens_size: 8192
+}
+model_name: QwenV3
+worker_grpc_addrs: [175.99.1.3:9001]
+worker_addrs: [175.99.1.3:9002:9004]
+specify_gpu_arch: ], parallelism config: [tp_size: 1
+ep_size: 1
+dp_size: 1
+world_size: 1
+world_rank: 0
+pp_size: 1
+local_world_size: 1
+local_rank: 0
+ffn_sp_size: 1
+tp_rank: 0
+ep_rank: 0
+dp_rank: 0
+ffn_tp_size: 1
+ffn_tp_rank: 0
+enable_sp: 0
+ffn_disaggregate_config: {
+enable_ffn_disaggregate: 0
+
+}
+prefill_cp_config: {
+method: DISABLED
+ comm_buffer_size: 536870912
+}
+], sp config: [model_type: 
+type: none
+sp_min_token_match: 2
+sp_max_token_match: 2
+tree_decode_config: 
+gen_num_per_cycle: 1
+force_stream_sample: 0
+force_score_context_attention: 1
+quantization: 
+checkpoint_path: ]
+[2026-05-29 03:28:50.777304] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc:76][bool rtp_llm::KVCacheConnectorCoordinator::init()] connector coordinator init, cache config: [CacheConfig{
+  # Model Configuration:
+  dtype=14
+  layer_num=28
+  layer_all_num=28
+  use_mla=false
+
+  # Block Configuration:
+  block_num=8144
+  seq_size_per_block=64
+  kernel_seq_size_per_block=64
+
+  # Block Sizing Information:
+  separate_kv_cache=1
+  kv_block_size_bytes=7340032
+  kv_scale_size_bytes=0
+  block_size_bytes=7340032
+  kv_block_stride_bytes=262144
+  kv_scale_stride_bytes=0
+  k_block_stride_bytes=131072
+  v_block_stride_bytes=131072
+
+  # Attention Configuration:
+  linear_step=1
+  group_layer_num=28
+  linear_group_num=0
+  full_group_num=0
+
+  # Cache Specifications:
+  cache_specs.size()=1
+  cache_specs[0] {
+    type=MultiHeadAttention(0)
+    dtype=14
+    layer_num=1
+    local_head_num_kv=8
+    seq_size_per_block=64
+    block_size=131072
+    k_block_size=65536
+    v_block_size=65536
+    block_size_bytes=262144
+    k_block_size_bytes=131072
+    v_block_size_bytes=131072
+    size_per_head=128
+    scale_size_per_block=0
+    scale_size_bytes_per_block=0
+    scale_block_size_bytes=0
+    k_scale_block_size_bytes=0
+    v_scale_block_size_bytes=0
+  }
+
+  # Layer Mapping:
+  global_layer_ids.size()=1
+  global_layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  layer_ids.size()=1
+  layer_ids=[[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]]
+  group_types.size()=1
+  group_types=[1]
+  layer_attn_types.size()=28
+  layer_attn_types=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+
+  # MTP Configurations:
+  mtp_sub_configs.size()=0
+
+}
+], kv cache config: [reuse_cache: 0
+multi_task_prompt: 
+multi_task_prompt_str: 
+multi_task_prompt_tokens: empty
+reserve_block_ratio: 5
+max_block_size_per_item: 16
+memory_cache_size_mb: 0
+memory_cache_sync_timeout_ms: 10000
+linear_step: 1
+separate_kv_cache: 1
+int8_kv_cache: 0
+fp8_kv_cache: 0
+ssm_state_dtype: bf16
+kv_cache_mem_mb: -1
+seq_size_per_block: 64
+kernel_seq_size_per_block: 0
+test_block_num: 0
+use_block_cache: -1
+enable_device_cache: 1
+enable_memory_cache: 0
+enable_remote_cache: 0
+write_cache_sync: 0
+enable_tiered_memory_cache: 0
+device_cache_min_free_blocks: 0
+load_cache_retry_times: 1
+], runtime config: [max_generate_batch_size: 32
+max_block_size_per_item: 16
+reserve_runtime_mem_mb: 1024
+warm_up: 1
+warm_up_with_loss: 0
+use_batch_decode_scheduler: 0
+batch_decode_scheduler_config: {
+batch_decode_scheduler_batch_size: 1
+batch_decode_scheduler_warmup_type: 0
+}
+fifo_scheduler_config: {
+max_context_batch_size: 1
+max_batch_tokens_size: 8192
+}
+model_name: QwenV3
+worker_grpc_addrs: [175.99.1.3:9001]
+worker_addrs: [175.99.1.3:9002:9004]
+specify_gpu_arch: ]
+[2026-05-29 03:28:50.777561] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:104][rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] create cache manager done
+[2026-05-29 03:28:50.777742] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_item_num] success
+[2026-05-29 03:28:50.777787] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_free_blocks] success
+[2026-05-29 03:28:50.777803] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_available_blocks] success
+[2026-05-29 03:28:50.777811] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_request_ref_blocks] success
+[2026-05-29 03:28:50.777812] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalExecutor.cc:43][rtp_llm::NormalExecutor::NormalExecutor(const rtp_llm::EngineInitParams&, const std::shared_ptr<rtp_llm::KVCacheManager>&, bool, bool, int, rtp_llm::MlaOpsType, int32_t, const std::vector<int>&)] enable_detail_log_ = 0, tp_rank_ = 0
+[2026-05-29 03:28:50.777818] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_connector_ref_blocks] success
+[2026-05-29 03:28:50.777836] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_left_seq] success
+[2026-05-29 03:28:50.777843] [INFO] [797669:799218] register mutable metric[rtp_llm_kv_cache_used_ratio] success
+[2026-05-29 03:28:50.777849] [INFO] [797669:799218] register mutable metric[rtp_llm_mr_cost_time_ms] success
+[2026-05-29 03:28:50.777906] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalExecutor.cc:98][rtp_llm::NormalExecutor::NormalExecutor(const rtp_llm::EngineInitParams&, const std::shared_ptr<rtp_llm::KVCacheManager>&, bool, bool, int, rtp_llm::MlaOpsType, int32_t, const std::vector<int>&)] init executor with python model
+[2026-05-29 03:28:50.777978] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/models/PyWrappedModel.h:154][rtp_llm::PyWrappedModel::PyWrappedModel(const rtp_llm::GptModelInitParams&, pybind11::object, bool, bool, const std::vector<int>&)] Set PYTHONUNBUFFERED=TRUE for Python interpreter.
+[2026-05-29 03:28:50.778216] [INFO] [797669:799219] thread started for name[CoordinatorUpdateThread]
+[2026-05-29 03:28:50.778241] [INFO] [797669:799219] loop started for thread[CoordinatorUpdateThread] loopInterval[1000]
+[2026-05-29 03:28:50.778693] [INFO] [797669:799220] register mutable metric[rtp_llm_context_tps] success
+[2026-05-29 03:28:50.778718] [INFO] [797669:799220] register mutable metric[rtp_llm_generate_tps] success
+[2026-05-29 03:28:50.778726] [INFO] [797669:799220] register mutable metric[rtp_llm_total_tps] success
+[2026-05-29 03:28:50.779378] [INFO] [797669:799221] thread started for name[CacheStoreAsync]
+[2026-05-29 03:28:50.779401] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/models/PyWrappedModel.h:291][rtp_llm::PyWrappedModel::PyWrappedModel(const rtp_llm::GptModelInitParams&, pybind11::object, bool, bool, const std::vector<int>&)] PyWrappedModel initialized done.
+[2026-05-29 03:28:50.779487] [INFO] [797669:799216] [RANK 0][175.99.1.3][./rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h:73][void rtp_llm::PrefixToCandidateTokens::reloadPrefixDictWithPrefix(std::string, std::string)] PrefixToCandidateTokens load filepath : 
+[2026-05-29 03:28:50.779530] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:113][rtp_llm::NormalEngine::NormalEngine(const rtp_llm::EngineInitParams&, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>)] create normal executor done
+[2026-05-29 03:28:50.779545] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:40][void rtp_llm::{anonymous}::releaseHostMemoryCache()] Released host memory cache to OS (malloc_trim returned 0)
+[2026-05-29 03:28:50.779564] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.cc:34][rtp_llm::FIFOScheduler::FIFOScheduler(const rtp_llm::RuntimeConfig&, const rtp_llm::ModelConfig&, const rtp_llm::PDSepConfig&, const rtp_llm::ParallelismConfig&, const rtp_llm::ModelSpecificConfig&, const std::shared_ptr<rtp_llm::KVCacheManager>&, kmonitor::MetricsReporterPtr, int)] max_generate_batch_size is [32], max_batch_tokens_size is [8192]
+[2026-05-29 03:28:50.779574] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:157][void rtp_llm::NormalEngine::initScheduler()] create fifo scheduler done
+[2026-05-29 03:28:50.779581] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:370][absl::lts_2020_09_23::Status rtp_llm::NormalEngine::startLoop()] start init system prompt
+[2026-05-29 03:28:50.779594] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/engine_base/stream/ResourceContext.cc:27][void rtp_llm::ResourceContext::initCacheConfig(const rtp_llm::KVCacheConfig&, const rtp_llm::FIFOSchedulerConfig&, int64_t)] device_cache_min_free_blocks auto-set to 128 (max_context_batch_size=1, max_seq_len=8192, max_batch_tokens_size=8192, seq_size_per_block=64)
+[2026-05-29 03:28:50.779601] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:372][absl::lts_2020_09_23::Status rtp_llm::NormalEngine::startLoop()] init system prompt done
+[2026-05-29 03:28:50.779608] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:374][absl::lts_2020_09_23::Status rtp_llm::NormalEngine::startLoop()] start normal engine loop
+[2026-05-29 03:28:50.779835] [INFO] [797669:799222] thread started for name[CacheStoreAsync]
+[2026-05-29 03:28:50.780173] [INFO] [797669:799223] thread started for name[CacheStoreAsync]
+[2026-05-29 03:28:50.780246] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/HttpApiServer.cc:15][void rtp_llm::HttpApiServer::init_controller(const rtp_llm::ConcurrencyConfig&, const rtp_llm::ParallelismConfig&)] Get concurrency_with_block: 0 from ConcurrencyConfig.
+[2026-05-29 03:28:50.780263] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/HttpApiServer.cc:19][void rtp_llm::HttpApiServer::init_controller(const rtp_llm::ConcurrencyConfig&, const rtp_llm::ParallelismConfig&)] CONCURRENCY_LIMIT to 32
+[2026-05-29 03:28:50.780279] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:322][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] grpc server add channel argument grpc.http2.max_ping_strikes: 1000
+[2026-05-29 03:28:50.780301] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:322][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] grpc server add channel argument grpc.http2.min_recv_ping_interval_without_data_ms: 1000
+[2026-05-29 03:28:50.780309] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:322][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] grpc server add channel argument grpc.max_concurrent_streams: 100000
+[2026-05-29 03:28:50.780324] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:322][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] grpc server add channel argument grpc.max_connection_idle_ms: 600000
+[2026-05-29 03:28:50.780333] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:322][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] grpc server add channel argument grpc.max_metadata_size: 1073741824
+[2026-05-29 03:28:50.780867] [INFO] [797669:799224] thread started for name[normal_engine_loop]
+[2026-05-29 03:28:50.781036] [INFO] [797669:799224] [RANK 0][175.99.1.3][rtp_llm/cpp/normal_engine/NormalEngine.cc:390][void rtp_llm::NormalEngine::loop()] loop begin
+[2026-05-29 03:28:50.782405] [INFO] [797669:799216] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:331][void rtp_llm::RtpLLMOp::initRPCServer(rtp_llm::EngineInitParams, pybind11::object, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams>, pybind11::object)] Server listening on 0.0.0.0:9001
+[2026-05-29 03:28:51.083431] [INFO] [797669:799229] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.083719] [INFO] [797669:799231] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.084061] [INFO] [797669:799230] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.084507] [INFO] [797669:799232] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.084776] [INFO] [797669:799233] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.084806] [INFO] [797669:799235] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.085662] [INFO] [797669:799236] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.085702] [INFO] [797669:799234] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.086055] [INFO] [797669:799237] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.086664] [INFO] [797669:799238] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.087115] [INFO] [797669:799239] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.087149] [INFO] [797669:799240] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.087755] [INFO] [797669:799241] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.088157] [INFO] [797669:799243] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.088457] [INFO] [797669:799242] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.088973] [INFO] [797669:799244] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.089357] [INFO] [797669:799245] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.089700] [INFO] [797669:799246] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.090242] [INFO] [797669:799247] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.090591] [INFO] [797669:799248] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.091138] [INFO] [797669:799249] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.091159] [INFO] [797669:799250] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.091937] [INFO] [797669:799251] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.092439] [INFO] [797669:799252] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.092500] [INFO] [797669:799253] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.092959] [INFO] [797669:799254] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.093389] [INFO] [797669:799255] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.093735] [INFO] [797669:799256] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.094114] [INFO] [797669:797669] source size [3] ,add name[cache_store]
+[2026-05-29 03:28:51.094147] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.cancel_qps] success
+[2026-05-29 03:28:51.094156] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.success_qps] success
+[2026-05-29 03:28:51.094164] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.qps] success
+[2026-05-29 03:28:51.094171] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.error_qps] success
+[2026-05-29 03:28:51.094178] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.concurrency_exception_qps] success
+[2026-05-29 03:28:51.094185] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.rt] success
+[2026-05-29 03:28:51.094191] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.response_first_token_rt] success
+[2026-05-29 03:28:51.094197] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.response_iterate_qps] success
+[2026-05-29 03:28:51.094204] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.response_iterate_rt] success
+[2026-05-29 03:28:51.094209] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.response_iterate_count] success
+[2026-05-29 03:28:51.094216] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.update_qps] success
+[2026-05-29 03:28:51.094222] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.error_update_target_qps] success
+[2026-05-29 03:28:51.094229] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.update_framework_rt] success
+[2026-05-29 03:28:51.094235] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_iterate_count] success
+[2026-05-29 03:28:51.094241] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_input_token_length] success
+[2026-05-29 03:28:51.094247] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_output_token_length] success
+[2026-05-29 03:28:51.094239] [INFO] [797669:799257] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.094253] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_pre_token_processor_rt] success
+[2026-05-29 03:28:51.094283] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_post_token_processor_rt] success
+[2026-05-29 03:28:51.094291] [INFO] [797669:797669] register mutable metric[rtp_llm.api_server.ft_num_beans] success
+[2026-05-29 03:28:51.094305] [INFO] [797669:797669] register restful api [GET] /health success
+[2026-05-29 03:28:51.094313] [INFO] [797669:797669] register restful api [POST] /health success
+[2026-05-29 03:28:51.094319] [INFO] [797669:797669] register restful api [GET] /GraphService/cm2_status success
+[2026-05-29 03:28:51.094324] [INFO] [797669:797669] register restful api [POST] /GraphService/cm2_status success
+[2026-05-29 03:28:51.094330] [INFO] [797669:797669] register restful api [GET] /SearchService/cm2_status success
+[2026-05-29 03:28:51.094336] [INFO] [797669:797669] register restful api [POST] /SearchService/cm2_status success
+[2026-05-29 03:28:51.094341] [INFO] [797669:797669] register restful api [GET] /status success
+[2026-05-29 03:28:51.094347] [INFO] [797669:797669] register restful api [POST] /status success
+[2026-05-29 03:28:51.094352] [INFO] [797669:797669] register restful api [POST] /health_check success
+[2026-05-29 03:28:51.094358] [INFO] [797669:797669] register restful api [GET] / success
+[2026-05-29 03:28:51.094367] [INFO] [797669:797669] register restful api [GET] /worker_status success
+[2026-05-29 03:28:51.094376] [INFO] [797669:797669] register restful api [GET] /v1/models success
+[2026-05-29 03:28:51.094383] [INFO] [797669:797669] register restful api [POST] /set_log_level success
+[2026-05-29 03:28:51.094389] [INFO] [797669:797669] register restful api [POST] /tokenizer/encode success
+[2026-05-29 03:28:51.094465] [WARN] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/openai/OpenaiEndpoint.cc:33][rtp_llm::OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<rtp_llm::Tokenizer>&, const std::shared_ptr<rtp_llm::ChatRender>&, const rtp_llm::ModelConfig&)] chat render is null
+[2026-05-29 03:28:51.094731] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/openai/OpenaiEndpoint.cc:44][rtp_llm::OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<rtp_llm::Tokenizer>&, const std::shared_ptr<rtp_llm::ChatRender>&, const rtp_llm::ModelConfig&)] use stop_words_list [<|im_end|>,<|im_start|>]
+[2026-05-29 03:28:51.094749] [INFO] [797669:797669] register restful api [POST] /chat/completions success
+[2026-05-29 03:28:51.094757] [INFO] [797669:797669] register restful api [POST] /v1/chat/completions success
+[2026-05-29 03:28:51.094763] [INFO] [797669:797669] register restful api [POST] /chat/render success
+[2026-05-29 03:28:51.094769] [INFO] [797669:797669] register restful api [POST] /v1/chat/render success
+[2026-05-29 03:28:51.094779] [INFO] [797669:797669] register restful api [POST] / success
+[2026-05-29 03:28:51.094787] [INFO] [797669:797669] register restful api [POST] /inference_internal success
+[2026-05-29 03:28:51.094798] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/HttpApiServer.cc:124][bool rtp_llm::HttpApiServer::registerServices()] HttpApiServer register services success.
+[2026-05-29 03:28:51.094929] [INFO] [797669:799258] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.095361] [INFO] [797669:799259] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.095736] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/api_server/HttpApiServer.cc:49][bool rtp_llm::HttpApiServer::start(const string&)] HttpApiServer start success, listen address is tcp:0.0.0.0:9005.
+[2026-05-29 03:28:51.095756] [INFO] [797669:797669] [RANK 0][175.99.1.3][rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc:346][void rtp_llm::RtpLLMOp::startHttpServer(pybind11::object, pybind11::object, pybind11::object, pybind11::object)] normal HTTP Server listening on tcp:0.0.0.0:9005
+[2026-05-29 03:28:51.096074] [INFO] [797669:799260] thread started for name[HttpRequestThreadPool]
+[2026-05-29 03:28:51.583615] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:28:51.583683] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:28:51.583707] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:28:51.583714] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:28:51.583811] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:28:51.583834] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:28:51.583840] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:28:51.583846] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:01.589243] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:01.589304] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:01.589330] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:01.589337] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:01.589403] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:01.589417] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:01.589423] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:01.589429] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:07.066397] [INFO] [797669:799224] register mutable metric[rtp_llm_wait_stream_size] success
+[2026-05-29 03:29:07.066462] [INFO] [797669:799224] register mutable metric[rtp_llm_running_stream_size] success
+[2026-05-29 03:29:07.066479] [INFO] [797669:799224] register mutable metric[rtp_llm_remote_running_stream_size] success
+[2026-05-29 03:29:07.066489] [INFO] [797669:799224] register mutable metric[rtp_llm_loading_cache_stream_size] success
+[2026-05-29 03:29:07.068438] [INFO] [797669:799224] [RANK 0][175.99.1.3][rtp_llm/cpp/model_utils/RopeCache.cc:99][at::Tensor rtp_llm::getRopeCache(const rtp_llm::RopeConfig&, int, bool)]   style: 1
+  dim: 128
+  base: 1000000
+  scale: 1
+  factor1: 1
+  factor2: 1
+  max_pos: 0
+  extrapolation_factor: 1
+  mscale: 1
+  offset: 0
+  index_factor: 1
+  mrope_dim1: 0
+  mrope_dim2: 0
+  mrope_dim3: 0
+  max_position_embeddings: 8192, interleave: 0
+[2026-05-29 03:29:08.564511] [INFO] [797669:799224] register mutable metric[rtp_llm_context_batch_size] success
+[2026-05-29 03:29:08.564569] [INFO] [797669:799224] register mutable metric[rtp_llm_generate_batch_size] success
+[2026-05-29 03:29:08.564580] [INFO] [797669:799224] register mutable metric[rtp_llm_context_batch_size_when_has_context] success
+[2026-05-29 03:29:08.564588] [INFO] [797669:799224] register mutable metric[rtp_llm_generate_batch_size_when_has_context] success
+[2026-05-29 03:29:08.564595] [INFO] [797669:799224] register mutable metric[rtp_llm_execute_token_size_when_has_context] success
+[2026-05-29 03:29:08.564601] [INFO] [797669:799224] register mutable metric[rtp_llm_max_seq_len_when_has_context] success
+[2026-05-29 03:29:08.564608] [INFO] [797669:799224] register mutable metric[rtp_llm_execute_token_size] success
+[2026-05-29 03:29:08.564614] [INFO] [797669:799224] register mutable metric[rtp_llm_max_seq_len] success
+[2026-05-29 03:29:08.564620] [INFO] [797669:799224] register mutable metric[rtp_llm_gather_model_input_us] success
+[2026-05-29 03:29:08.564627] [INFO] [797669:799224] register mutable metric[rtp_llm_tp_sync_input_us] success
+[2026-05-29 03:29:08.564633] [INFO] [797669:799224] register mutable metric[rtp_llm_model_forward_us] success
+[2026-05-29 03:29:08.564640] [INFO] [797669:799224] register mutable metric[rtp_llm_sample_input_us] success
+[2026-05-29 03:29:08.564646] [INFO] [797669:799224] register mutable metric[rtp_llm_dispatch_output_us_metric] success
+[2026-05-29 03:29:08.564652] [INFO] [797669:799224] register mutable metric[rtp_llm_eplb_step_latency_us] success
+[2026-05-29 03:29:08.564925] [INFO] [797669:799224] register mutable metric[rtp_llm_step_latency_us] success
+[2026-05-29 03:29:11.594590] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:11.594662] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:11.594692] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:11.594699] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:11.594766] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:11.594779] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:11.594786] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:11.594791] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:16.597970] [INFO] [797669:799264] register mutable metric[rtp_llm_framework_qps] success
+[2026-05-29 03:29:16.598037] [INFO] [797669:799264] register mutable metric[rtp_llm_framework_error_qps] success
+[2026-05-29 03:29:16.598047] [INFO] [797669:799264] register mutable metric[rtp_llm_cancel_qps] success
+[2026-05-29 03:29:16.598056] [INFO] [797669:799264] register mutable metric[rtp_llm_is_streaming_qps] success
+[2026-05-29 03:29:16.598063] [INFO] [797669:799264] register mutable metric[rtp_llm_not_streaming_qps] success
+[2026-05-29 03:29:16.598070] [INFO] [797669:799264] register mutable metric[rtp_llm_latency_us] success
+[2026-05-29 03:29:16.598076] [INFO] [797669:799264] register mutable metric[rtp_llm_first_token_latency_us] success
+[2026-05-29 03:29:16.598083] [INFO] [797669:799264] register mutable metric[rtp_llm_wait_latency_us] success
+[2026-05-29 03:29:16.598089] [INFO] [797669:799264] register mutable metric[rtp_llm_pause_latency_us] success
+[2026-05-29 03:29:16.598095] [INFO] [797669:799264] register mutable metric[rtp_llm_iterate_count] success
+[2026-05-29 03:29:16.598100] [INFO] [797669:799264] register mutable metric[rtp_llm_reuse_length] success
+[2026-05-29 03:29:16.598130] [INFO] [797669:799264] register mutable metric[rtp_llm_input_token_length] success
+[2026-05-29 03:29:16.598137] [INFO] [797669:799264] register mutable metric[rtp_llm_output_token_length] success
+[2026-05-29 03:29:16.598144] [INFO] [797669:799264] register mutable metric[rtp_llm_timeout_lantency_us] success
+[2026-05-29 03:29:16.598150] [INFO] [797669:799264] register mutable metric[rtp_llm_query_batch_size] success
+[2026-05-29 03:29:16.598156] [INFO] [797669:799264] register mutable metric[rtp_llm_batch_with_prefill_times] success
+[2026-05-29 03:29:16.598162] [INFO] [797669:799264] register mutable metric[rtp_llm_batch_with_prefill_len] success
+[2026-05-29 03:29:16.598168] [INFO] [797669:799264] register mutable metric[rtp_llm_malloc_failed_times] success
+[2026-05-29 03:29:16.598241] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_qps] success
+[2026-05-29 03:29:16.598251] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_error_qps] success
+[2026-05-29 03:29:16.598257] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_cancel_qps] success
+[2026-05-29 03:29:16.598269] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_onflight_request] success
+[2026-05-29 03:29:16.598275] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_total_rt_us] success
+[2026-05-29 03:29:16.598282] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_retry_times] success
+[2026-05-29 03:29:16.598289] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_retry_cost_time_ms] success
+[2026-05-29 03:29:16.598295] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_loading_cache_request] success
+[2026-05-29 03:29:16.598302] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_get_rpc_connection_rt_us] success
+[2026-05-29 03:29:16.598308] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_multimodal_process_rt_us] success
+[2026-05-29 03:29:16.598314] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_remote_allocate_resource_rt_us] success
+[2026-05-29 03:29:16.598321] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_enqueue_request_rt_us] success
+[2026-05-29 03:29:16.598328] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_remote_load_cache_start_rt_us] success
+[2026-05-29 03:29:16.598334] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_poll_local_output_rt_us] success
+[2026-05-29 03:29:16.598342] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_remote_load_cache_end_rt_us] success
+[2026-05-29 03:29:16.598349] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_remote_generate_rt_us] success
+[2026-05-29 03:29:16.598355] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_poll_remote_output_rt_us] success
+[2026-05-29 03:29:16.598361] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_prepare_generate_context_rt_us] success
+[2026-05-29 03:29:16.598366] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_allocate_resource_rt_us] success
+[2026-05-29 03:29:16.598373] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_load_cache_from_prefill_rt_us] success
+[2026-05-29 03:29:16.598379] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_local_generate_rt_us] success
+[2026-05-29 03:29:16.598385] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_load_cache_min_rt_us] success
+[2026-05-29 03:29:16.598391] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_load_cache_max_rt_us] success
+[2026-05-29 03:29:16.598398] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_load_cache_polling_cost_us] success
+[2026-05-29 03:29:16.598403] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_notify_store_cache_rt_us] success
+[2026-05-29 03:29:16.598411] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_generate_first_token_rt_us] success
+[2026-05-29 03:29:16.598417] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_wait_store_cache_rt_us] success
+[2026-05-29 03:29:16.598424] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_min_response_done_time_us] success
+[2026-05-29 03:29:16.598436] [INFO] [797669:799264] register mutable metric[rtp_llm_rpc_max_response_done_time_us] success
+[2026-05-29 03:29:21.600142] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:21.600197] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:21.600221] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:21.600229] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:21.600295] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:21.600311] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:21.600319] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:21.600326] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:31.605655] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:31.605725] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:31.605743] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:31.605751] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:31.605818] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:31.605835] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:31.605843] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:31.605849] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:41.611226] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:41.611304] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:41.611322] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:41.611330] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:41.611394] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:41.611412] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:41.611420] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:41.611427] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:51.516720] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:51.516784] [WARN] [797669:799215] agent client failed, host[127.0.0.1] port[4141]
+[2026-05-29 03:29:51.516801] [WARN] [797669:799215] socket is unnormal, can't write socket
+[2026-05-29 03:29:51.516810] [WARN] [797669:799215] socket write failed, socket is in problem
+[2026-05-29 03:29:51.516875] [WARN] [797669:799215] socket connect host[127.0.0.1] port[4141] failed
+[2026-05-29 03:29:51.516893] [WARN] [797669:799215] read failed in socket: errno=107
+[2026-05-29 03:29:51.516900] [WARN] [797669:799215] read thrift reply size failed: -1
+[2026-05-29 03:29:51.516907] [WARN] [797669:799215] agent client send fail, host[127.0.0.1] port[4141]

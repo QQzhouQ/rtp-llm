@@ -147,6 +147,16 @@ private:
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;
 
+        cfg.k_pool_size_bytes = 0;
+        cfg.v_pool_size_bytes = 0;
+        if (cache_config.separate_kv_cache) {
+            cfg.k_pool_size_bytes =
+                static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.k_block_stride_bytes;
+            cfg.v_pool_size_bytes =
+                static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.v_block_stride_bytes;
+            cfg.kv_block_pool_size_bytes = cfg.k_pool_size_bytes;
+        }
+
         cfg.kv_scale_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_scale_stride_bytes;
         cfg.total_size_bytes = cfg.kv_block_pool_size_bytes + cfg.kv_scale_pool_size_bytes;

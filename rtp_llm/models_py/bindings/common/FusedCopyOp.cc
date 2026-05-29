@@ -1,3 +1,4 @@
+#include <cstring>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
@@ -32,12 +33,15 @@ void fusedCopy(const FusedD2DCopyParams& params) {
 #elif USING_ASCEND
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     for (int i = 0; i < params.num_copies; ++i) {
+        aclrtMemcpyKind kind = rtp_llm::ascend::getMemcpyKind(params.src[i], params.dst[i]);
         ASCEND_CHECK(aclrtMemcpyAsync(params.dst[i], params.size[i],
-                                       params.src[i], params.size[i],
-                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                                       const_cast<void*>(params.src[i]), params.size[i],
+                                       kind, stream));
     }
 #else
-    throw std::runtime_error("No supported GPU backend found for fusedCopy");
+    for (int i = 0; i < params.num_copies; ++i) {
+        memcpy(params.dst[i], params.src[i], params.size[i]);
+    }
 #endif
 }
 
@@ -51,18 +55,28 @@ void fusedStridedCopy(const FusedStridedCopyParams& params) {
 #elif USING_ASCEND
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     for (int i = 0; i < params.num_copies; ++i) {
-        const char* src_base = static_cast<const char*>(params.src[i]);
-        char*       dst_base = static_cast<char*>(params.dst[i]);
+        aclrtMemcpyKind kind = rtp_llm::ascend::getMemcpyKind(params.src[i], params.dst[i]);
+        const char* src_ptr = static_cast<const char*>(params.src[i]);
+        char* dst_ptr = static_cast<char*>(params.dst[i]);
         for (size_t row = 0; row < params.num_rows[i]; ++row) {
-            const void* src_ptr = src_base + row * params.src_row_stride[i];
-            void*       dst_ptr = dst_base + row * params.dst_row_stride[i];
             ASCEND_CHECK(aclrtMemcpyAsync(dst_ptr, params.row_bytes[i],
-                                           src_ptr, params.row_bytes[i],
-                                           ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                                           const_cast<void*>(static_cast<const void*>(src_ptr)),
+                                           params.row_bytes[i],
+                                           kind, stream));
+            src_ptr += params.src_row_stride[i];
+            dst_ptr += params.dst_row_stride[i];
         }
     }
 #else
-    throw std::runtime_error("No supported GPU backend found for fusedStridedCopy");
+    for (int i = 0; i < params.num_copies; ++i) {
+        const char* src_ptr = static_cast<const char*>(params.src[i]);
+        char* dst_ptr = static_cast<char*>(params.dst[i]);
+        for (size_t row = 0; row < params.num_rows[i]; ++row) {
+            memcpy(dst_ptr, src_ptr, params.row_bytes[i]);
+            src_ptr += params.src_row_stride[i];
+            dst_ptr += params.dst_row_stride[i];
+        }
+    }
 #endif
 }
 

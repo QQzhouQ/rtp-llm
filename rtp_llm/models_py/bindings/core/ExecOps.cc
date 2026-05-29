@@ -618,6 +618,9 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 #elif USING_ASCEND
         RTP_LLM_LOG_INFO("Initialize runtime (Ascend). device_id=%zu", device_id);
         ASCEND_CHECK(aclrtSetDevice(device_id));
+        if (resolved_mla_ops_type == MlaOpsType::AUTO) {
+            resolved_mla_ops_type = MlaOpsType::FLASH_INFER;
+        }
 #endif
 
         g_enable_comm_overlap = enable_comm_overlap;
