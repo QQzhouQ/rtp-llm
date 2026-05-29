@@ -1,5 +1,3 @@
-import logging
-
 import torch
 import torch_npu
 
@@ -127,19 +125,7 @@ class AscendPrefillAttnOp:
         self.params = params
 
     def prepare(self, attn_inputs):
-        bt = attn_inputs.kv_cache_kernel_block_id_host
-        bt_phys = attn_inputs.kv_cache_block_id_host
-        il = attn_inputs.input_lengths
-        pl = attn_inputs.prefix_lengths
-        sl = attn_inputs.sequence_lengths
-        logging.warning(
-            f"[ASCEND_PREFILL_PREPARE] kernel_bt={bt.shape if bt is not None and bt.numel() > 0 else None} "
-            f"phys_bt={bt_phys.shape if bt_phys is not None and bt_phys.numel() > 0 else None} "
-            f"input_lengths={il.shape} prefix_lengths={pl.shape} seq_lengths={sl.shape if sl is not None else None} "
-            f"input_lengths_vals={il.tolist() if il is not None else None} "
-            f"prefix_lengths_vals={pl.tolist() if pl is not None else None}"
-        )
-        self.block_table = bt
+        self.block_table = attn_inputs.kv_cache_kernel_block_id_host
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:
