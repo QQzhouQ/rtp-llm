@@ -84,7 +84,7 @@ class AscendDecodeImpl(FMHAImplBase):
         else:
             q = qkv.chunk(3, dim=-1)[0]
 
-        self.fmha_impl.context_lens = self.attn_inputs.sequence_lengths
+        self.fmha_impl.context_lens = self.attn_inputs.sequence_lengths + 1
 
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
