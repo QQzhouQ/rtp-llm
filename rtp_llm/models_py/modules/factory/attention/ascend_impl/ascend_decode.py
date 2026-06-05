@@ -136,7 +136,12 @@ class AscendDecodeAttnOp:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:
                 self.block_table = self.block_table.reshape(-1, self.block_table.shape[-1])
-        self.context_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
+        if attn_inputs.sequence_lengths.numel() > 0:
+            self.context_lens = attn_inputs.sequence_lengths + 1
+        elif attn_inputs.prefix_lengths.numel() > 0 and attn_inputs.input_lengths.numel() > 0:
+            self.context_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
+        else:
+            self.context_lens = None
 
     def forward(self, q, kv_cache):
         k_cache = kv_cache.k_cache_base.permute(0, 2, 1, 3).contiguous()
@@ -151,7 +156,7 @@ class AscendDecodeAttnOp:
         actual_seq_q = torch.arange(
             1, batch_size + 1, dtype=torch.int32, device=q.device
         )
-        actual_seq_kv = torch.cumsum(context_lens.to(torch.int32), dim=0)
+        actual_seq_kv = context_lens.to(torch.int32)
         if actual_seq_kv.device.type != q.device.type:
             actual_seq_kv = actual_seq_kv.to(q.device)
         atten_mask = self._get_causal_mask(q.device)

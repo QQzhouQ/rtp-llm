@@ -134,7 +134,7 @@ class AscendPrefillAttnOp:
         seq_lens_q = attn_inputs.input_lengths
         seq_lens_kv = attn_inputs.prefix_lengths + attn_inputs.input_lengths
         self.actual_seq_q = torch.cumsum(seq_lens_q, dim=0)
-        self.actual_seq_kv = torch.cumsum(seq_lens_kv, dim=0)
+        self.actual_seq_kv = seq_lens_kv
 
     def forward(self, q, kv_cache):
         k_cache = kv_cache.k_cache_base.permute(0, 2, 1, 3).contiguous()
