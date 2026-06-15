@@ -13,6 +13,7 @@
 #include <memory>
 #elif USING_ASCEND
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p_custom.h"
 #endif
 
 using namespace std;
@@ -285,105 +286,161 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 #elif USING_ASCEND
 
 // ============================================================
-// Sample ops (Ascend) — pure PyTorch fallback implementations
+// Sample ops (Ascend) — NPU-accelerated implementation
+//
+// Strategy:
+//   - Temperature:        PyTorch div_() → torch_npu maps to NPU
+//   - Top-k/Top-p:        AscendC custom op applyTopKTopP
+//   - Repetition penalty: not yet available (AscendC kernel TBD)
+//   - Sampling:           torch::multinomial (same fallback as ROCm)
 // ============================================================
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    const auto batch_size        = params.logits.size(0);
-    const auto vocab_size_padded = params.logits.size(1);
-    const auto step              = params.step;
-    const auto orig_device       = params.logits.device();
+    static const auto device_type = torch::Device(torch::kPrivateUse1);
+    const auto        batch_size  = params.logits.size(0);
 
-    auto device_tokens     = params.token_ids.to(orig_device);
+    // [batch_size, step + 1] — clone to NPU
+    auto device_tokens     = params.token_ids.to(device_type);
+    // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
-    auto top_k_ptr         = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
-    auto top_p_ptr         = params.top_p.data_ptr<float>();
 
-    // Move logits to CPU for sampling to avoid NPU op compatibility issues
-    auto logits = params.logits.to(torch::kCPU);
+    // ---- Handle do_sample: save logits for non-sampling (greedy) batches ----
+    bool has_not_do_sample = params.do_sample.has_value() &&
+                             std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                         params.do_sample.value().data_ptr<bool>() + batch_size,
+                                         [](auto t) { return !t; });
+    bool need_do_sample    = (!params.do_sample.has_value()) ||
+                              std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                         params.do_sample.value().data_ptr<bool>() + batch_size,
+                                         [](auto t) { return t; });
 
-    // 1. Apply temperature on CPU
-    if (params.temperature.defined()) {
-        auto temp = params.temperature.to(torch::kCPU);
-        bool any_non_one = false;
-        for (int64_t i = 0; i < batch_size; i++) {
-            if (temp.data_ptr<float>()[i] != 1.0f) { any_non_one = true; break; }
+    torch::Tensor selected_logits;
+    torch::Tensor mask_tensor;
+    if (has_not_do_sample && need_do_sample) {
+        auto do_sample_npu = params.do_sample.value().to(device_type);
+        mask_tensor        = do_sample_npu.reshape({(int64_t)batch_size, 1}).logical_not();
+        selected_logits    = params.logits.masked_select(mask_tensor);
+    }
+
+    // ---- 1. Apply temperature penalty (PyTorch op, torch_npu handles NPU) ----
+    if (need_do_sample) {
+        if (std::any_of(params.temperature.data_ptr<float>(),
+                        params.temperature.data_ptr<float>() + batch_size,
+                        [](auto t) { return t != 1.0f; })) {
+            auto temperature_npu = params.temperature.to(device_type).reshape({(int64_t)batch_size, 1});
+            params.logits.div_(temperature_npu);
         }
-        if (any_non_one) { logits = logits / temp.unsqueeze(1); }
     }
 
-    // 2. Fast path: top_k=1 -> argmax
-    bool all_topk1 = true;
-    for (int64_t i = 0; i < batch_size; i++) {
-        if (top_k_ptr[i] != 1) { all_topk1 = false; break; }
+    // Restore non-sampling batch logits (penalties should not affect greedy batches)
+    if (has_not_do_sample && need_do_sample) {
+        params.logits.masked_scatter_(mask_tensor, selected_logits);
     }
 
-    torch::Tensor selected_tokens;
+    // ---- 2. Fast path: top_k = 1 for all batches → argmax only ----
+    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; }) &&
+        !params.output_all_probs.has_value()) {
+        auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
+                                                  transposed_tokens.size(0)).squeeze(0);
+        auto selected_tokens = torch::argmax(params.logits, -1, /*keepdim=*/false);
+        samples_t.copy_(selected_tokens);
 
-    if (all_topk1 && !params.output_all_probs.has_value()) {
-        selected_tokens = torch::argmax(logits, -1, false);
+        auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+        params.token_ids.copy_(output_tokens);
+        return GreedyOutput{};
+    }
+
+    // ---- 3. Apply top-k/top-p filtering via AscendC custom operator ----
+    auto top_p_ptr = params.top_p.data_ptr<float>();
+    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr,
+                   [](auto t) { return std::abs(t) < 1e-7f ? 1.0f : t; });
+
+    bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size,
+                                   [](auto t) { return t <= 0; });
+    bool has_top_p = !std::all_of(top_p_ptr, top_p_ptr + batch_size,
+                                   [](auto t) { return std::abs(t - 1.0f) < 1e-7f; });
+
+    if (has_top_k || has_top_p) {
+        // Move top_k/top_p from CPU to NPU.
+        // applyTopKTopP expects: k → INT32 1D [batch_size], p → FLOAT32 1D [batch_size].
+        c10::optional<at::Tensor> k_npu;
+        c10::optional<at::Tensor> p_npu;
+        if (has_top_k) {
+            k_npu = params.top_k.to(torch::TensorOptions().dtype(torch::kInt32).device(device_type));
+        }
+        if (has_top_p) {
+            p_npu = params.top_p.to(torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
+        }
+
+        at::Tensor output = at::empty_like(params.logits);
+        rtp_llm::ascend::applyTopKTopP(params.logits, p_npu, k_npu, output);
+        params.logits.copy_(output);
+    }
+
+    // ---- 4. Softmax → probabilities ----
+    auto probs_t = torch::softmax(params.logits, -1);
+    params.logits.copy_(probs_t);
+
+    // ---- 5. Output_all_probs / cum_log_probs setup ----
+    torch::Tensor output_all_probs_t;
+    bool          need_output_all_probs = params.output_all_probs.has_value();
+    if (need_output_all_probs) {
+        output_all_probs_t = params.output_all_probs.value();
+    }
+    if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
+        output_all_probs_t = torch::zeros_like(probs_t);
+    }
+
+    // ---- 6. Sample ----
+    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
+                                              transposed_tokens.size(0)).squeeze(0);
+
+    bool all_topk_1 = std::all_of(top_k_ptr, top_k_ptr + batch_size,
+                                   [](auto t) { return t == 1; });
+    if (all_topk_1) {
+        // Greedy: argmax
+        auto selected = torch::argmax(probs_t, -1, /*keepdim=*/false);
+        samples_t.copy_(selected);
     } else {
-        // 3. softmax + top_k/top_p filtering + multinomial sampling on CPU
-        auto probs = torch::softmax(logits, -1);
-
-        if (all_topk1) {
-            selected_tokens = torch::argmax(probs, -1, false);
-        } else {
-            auto filtered = probs.clone();
-            for (int64_t b = 0; b < batch_size; b++) {
-                int k = top_k_ptr[b] <= 0 ? vocab_size_padded : top_k_ptr[b];
-                if ((int64_t)k < vocab_size_padded) {
-                    auto row = filtered[b];
-                    auto result = row.topk(k);
-                    auto min_val = std::get<0>(result)[-1];
-                    row.masked_fill_(row < min_val, 0.0f);
-                }
-            }
-            for (int64_t b = 0; b < batch_size; b++) {
-                float p = top_p_ptr[b];
-                if (std::abs(p - 1.0f) >= 1e-7 && p > 0.0f) {
-                    auto row = filtered[b];
-                    auto sort_result = row.sort(0, true);
-                    auto sorted_probs = std::get<0>(sort_result);
-                    auto sorted_indices = std::get<1>(sort_result);
-                    auto cumsum = sorted_probs.cumsum(0);
-                    auto mask = cumsum - sorted_probs > p;
-                    sorted_probs.masked_fill_(mask, 0.0f);
-                    row.scatter_(0, sorted_indices, sorted_probs);
-                }
-            }
-            filtered = filtered.clamp_min(0.0f);
-            auto row_sums = filtered.sum(-1, true);
-            filtered = filtered / row_sums.clamp_min(1e-10);
-            filtered = filtered.nan_to_num(0.0f);
-            selected_tokens = torch::multinomial(filtered, 1, false).squeeze(-1);
-            if (params.output_all_probs.has_value()) {
-                params.output_all_probs.value().copy_(filtered.to(orig_device));
+        // Random sample: multinomial (same fallback as ROCm).
+        // Only use a generator whose device matches the probs tensor;
+        // a mismatched generator (e.g. CPU gen on NPU data) causes a
+        // RuntimeError. If no matching generator is found, pass nullopt
+        // to use the default per-device generator (random in production).
+        c10::optional<at::Generator> gen;
+        for (auto& g : params.generator) {
+            if (g.defined() && g.device().type() == probs_t.device().type()) {
+                gen = g;
+                break;
             }
         }
-
-        // 4. cum_log_probs on CPU
-        if (params.cum_log_probs.has_value()) {
-            auto log_probs = torch::log_softmax(logits, -1);
-            auto sel_idx = selected_tokens.unsqueeze(1);
-            auto token_log_probs = log_probs.gather(1, sel_idx).squeeze(1);
-            params.cum_log_probs.value().add_(token_log_probs.to(orig_device));
-        }
+        auto selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
+        samples_t.copy_(selected);
     }
 
-    // Copy selected tokens back to original device and update token_ids
-    auto selected_on_device = selected_tokens.to(orig_device);
-    transposed_tokens[transposed_tokens.size(0) - 1].copy_(selected_on_device);
-    params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+    if (need_output_all_probs) {
+        output_all_probs_t.copy_(probs_t);
+    }
+
+    // ---- 7. Update cum_log_probs ----
+    if (params.cum_log_probs.has_value()) {
+        auto cum_log_probs_t = params.cum_log_probs.value();
+        // Use log_softmax on the pre-filtered logits for numerical stability
+        auto log_probs       = torch::log_softmax(params.logits, -1);
+        auto token_log_probs = log_probs.gather(-1, samples_t.reshape({(int64_t)batch_size, 1})).squeeze(-1);
+        cum_log_probs_t.add_(token_log_probs.to(cum_log_probs_t.device()));
+    }
+
+    // ---- 8. Copy results back to token_ids ----
+    auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+    params.token_ids.copy_(output_tokens);
 
     return GreedyOutput{};
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    params.output_token_ids_d.copy_(params.draft_token_ids_d);
-    auto draft_len = params.draft_probs_d.size(1);
-    params.output_accepted_token_num_d.fill_(draft_len);
-    params.output_emitted_token_num_d.fill_(draft_len);
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 #else  // !USING_CUDA — ROCm platform
