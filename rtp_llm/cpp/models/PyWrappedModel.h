@@ -15,6 +15,8 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#elif USING_ASCEND
+#include "rtp_llm/cpp/ascend_graph/ascend_graph_runner.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -246,20 +248,69 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                          static_cast<int>(params.parallelism_config.tp_size),
                                                          static_cast<int>(params.parallelism_config.tp_rank));
         }
+#elif USING_ASCEND
+        // Ascend ACL Graph: decode-only. Prefill graph mode is rejected in the
+        // runner constructor — fall back to eager forward in that case.
+        if (is_prefill_cuda_graph_mode) {
+            RTP_LLM_LOG_WARNING(
+                "Ascend ACL Graph does not support prefill cuda graph mode; "
+                "graph_runner_ will not be created, falling back to eager forward.");
+        } else {
+            c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
+            GraphParams      graph_params;
+            graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+            graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
+            graph_params.is_prefill_cuda_graph_mode   = false;  // ACL Graph is decode-only
+            graph_params.max_seq_len                  = params.max_seq_len;
+            graph_params.tokens_per_block             = params.tokens_per_block;
+            graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
+            graph_params.hidden_size                  = params.hidden_size;
+            graph_params.model_data_type              = dtype;
+            graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+            graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+            graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+
+            if (kv_cache_layer_to_group.size() > 0) {
+                graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
+            } else {
+                graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
+            }
+
+            graph_params.is_target_verify = use_spec_decoding;
+            if (params.sp_config.type != SP_TYPE_NONE) {
+                graph_params.sp_steps           = params.sp_config.gen_num_per_cycle;
+                graph_params.num_tokens_per_bs  = params.sp_config.gen_num_per_cycle + 1;
+            } else {
+                graph_params.num_tokens_per_bs  = 1;
+            }
+
+            graph_runner_ = new AscendGraphRunner(graph_params, py_instance);
+            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper (Ascend)");
+        }
 #else
-        RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
+        RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP/ACL Graph is not supported on current platform");
 #endif
-        if (weights_.position_encoding) {
-            graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.cuda());
+        if (graph_runner_ != nullptr) {
+            if (weights_.position_encoding) {
+#if USING_ASCEND
+                graph_runner_->setPositionEncoding(weights_.position_encoding->kernel);
+#else
+                graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.cuda());
+#endif
+            }
+            if (weights_.token_type_embedding) {
+#if USING_ASCEND
+                graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel);
+#else
+                graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
+#endif
+            }
+            graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
+            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
+            auto py_initialize_method = py_instance.attr("initialize");
+            py_init_result            = py_initialize_method(init_resources);
+            graph_runner_->initCapture();
         }
-        if (weights_.token_type_embedding) {
-            graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
-        }
-        graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
-        auto py_initialize_method = py_instance.attr("initialize");
-        py_init_result            = py_initialize_method(init_resources);
-        graph_runner_->initCapture();
     }
 
     auto py_init_success = py_init_result.cast<bool>();
