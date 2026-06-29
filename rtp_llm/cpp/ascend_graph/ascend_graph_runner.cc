@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "rtp_llm/cpp/ascend_graph/ascend_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -401,6 +402,8 @@ void AscendGraphRunner::initCapture() {
     capture_mem_hold_.setHiddenStates(output);
 
     captureDecode();
+    RTP_LLM_LOG_INFO("Ascend graph initCapture done, captured %zu graph instances",
+                     graph_instances_.size());
 }
 
 // ============================================================
@@ -412,7 +415,14 @@ void AscendGraphRunner::captureDecodeOneBatchSize(int bs) {
 }
 
 void AscendGraphRunner::captureDecode() {
-    RTP_LLM_LOG_INFO("Ascend graph Capture Decode Start");
+    std::string range_str;
+    for (size_t i = 0; i < capture_range_.size(); ++i) {
+        range_str += std::to_string(capture_range_[i]);
+        if (i + 1 < capture_range_.size()) range_str += ", ";
+    }
+    RTP_LLM_LOG_INFO("Ascend graph Capture Decode Start, %zu buckets (capture order large->small): [%s]",
+                     capture_range_.size(),
+                     range_str.c_str());
     for (int bs : capture_range_) {
         graph_instances_.try_emplace(bs);
     }
@@ -479,6 +489,11 @@ void AscendGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             ascend_graph::graphCaptureEnd(graph);
         }
+        RTP_LLM_LOG_INFO("Ascend graph Capture for %s %d success, captured output shape: [%lld x %lld]",
+                         key_type,
+                         key,
+                         (long long)graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.size(0),
+                         (long long)graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.size(1));
     }
 #else
     (void)key;
@@ -495,6 +510,7 @@ void AscendGraphRunner::replayGraph(int key) {
 }
 
 void AscendGraphRunner::replayDecode(int bs) {
+    RTP_LLM_LOG_DEBUG("Ascend graph replayDecode for bs=%d", bs);
     replayGraph(bs);
 }
 
@@ -527,6 +543,10 @@ static void copyTensorSlice(const torch::Tensor& src, torch::Tensor& dst) {
 
 void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("ascend_graph.prepareInputs");
+    RTP_LLM_LOG_DEBUG("Ascend graph prepareInputs: batch_size=%d -> graph_bs=%d, token_num=%d",
+                      state.current_batch_size,
+                      state.current_real_graph_bs,
+                      inputs.input_ids.size(0));
     // Wait for the previous forward to finish before overwriting persistent buffers.
     forward_event_.synchronize();
 
@@ -651,7 +671,10 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
 
 PyModelOutputs AscendGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
     PyModelOutputs outputs;
-    RTP_LLM_LOG_DEBUG("Ascend graph Replay Start");
+    RTP_LLM_LOG_DEBUG("Ascend graph Replay Start, batch_size=%d -> graph_bs=%d, seq_len_sum=%d",
+                      state.current_batch_size,
+                      state.current_real_graph_bs,
+                      state.seq_len_sum);
     prepareInputs(inputs, state);
     {
         RTP_LLM_PROFILE_SCOPE("ascend_graph.forward(replayDecode)");
@@ -664,7 +687,10 @@ PyModelOutputs AscendGraphRunner::forward(const PyModelInputs& inputs, CudaGraph
         graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
             0, 0, state.seq_len_sum).clone();
     forward_event_.record(ascend_graph::graphGetCurrentStream());
-    RTP_LLM_LOG_DEBUG("Ascend graph Replay End");
+    RTP_LLM_LOG_DEBUG("Ascend graph Replay End, graph_bs=%d, output shape: [%lld x %lld]",
+                      state.current_real_graph_bs,
+                      (long long)outputs.hidden_states.size(0),
+                      (long long)outputs.hidden_states.size(1));
     return outputs;
 }
 
