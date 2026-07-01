@@ -285,11 +285,76 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 #elif USING_ASCEND
 
 // ============================================================
-// Sample ops (Ascend) — stub implementations
+// Sample ops (Ascend) — PyTorch-based implementation
 // ============================================================
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    const auto device = params.logits.device();
+
+    // [batch_size, step + 1] — clone to device
+    auto device_tokens    = params.token_ids.to(device, /*non_blocking=*/true);
+    // [step + 1, batch_size]
+    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+
+    const auto batch_size = params.logits.size(0);
+
+    // Greedy fast path: all top_k <= 1 (0 = no filter, 1 = explicit greedy)
+    auto* top_k_ptr = params.top_k.data_ptr<int32_t>();
+    bool  all_greedy = true;
+    for (int i = 0; i < batch_size; ++i) {
+        if (top_k_ptr[i] > 1) { all_greedy = false; break; }
+    }
+
+    // Last position slot to receive the sampled token
+    auto samples_t = transposed_tokens.slice(
+        0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
+
+    if (all_greedy && !params.output_all_probs.has_value()) {
+        auto selected_tokens = torch::argmax(params.logits, /*dim=*/-1, /*keepdim=*/false);
+        samples_t.copy_(selected_tokens, /*non_blocking=*/true);
+    } else {
+        // Stochastic sampling with temperature, top_k, top_p
+        auto* top_p_ptr = params.top_p.data_ptr<float>();
+        auto* temp_ptr  = params.temperature.data_ptr<float>();
+
+        torch::Tensor selected = torch::empty({batch_size}, torch::dtype(torch::kInt64).device(device));
+
+        for (int i = 0; i < batch_size; ++i) {
+            auto logits_i = params.logits.select(0, i);            // [vocab]
+            // Temperature scaling
+            float temp = temp_ptr[i];
+            if (temp > 0 && temp != 1.0f) {
+                logits_i = logits_i / temp;
+            }
+            // Softmax → probabilities
+            auto probs = torch::softmax(logits_i, /*dim=*/-1);
+            // Top-k filtering
+            int k = top_k_ptr[i];
+            if (k > 0 && k < probs.size(0)) {
+                auto topk = probs.topk(k, /*dim=*/-1);
+                probs = torch::zeros_like(probs);
+                probs.index_copy_(0, std::get<1>(topk), std::get<0>(topk));
+            }
+            // Top-p (nucleus) filtering
+            float p = top_p_ptr[i];
+            if (p > 0.0f && p < 1.0f) {
+                auto sorted  = probs.sort(-1, /*descending=*/true);
+                auto cumsum  = std::get<0>(sorted).cumsum(0);
+                auto mask    = cumsum > p;
+                mask[0] = false;  // keep at least one token
+                probs.index_fill_(0, std::get<1>(sorted).masked_select(mask), 0.0);
+                probs = probs / probs.sum();
+            }
+            // Multinomial sampling
+            auto token = torch::multinomial(probs, /*num_samples=*/1);
+            selected[i].copy_(token.squeeze(0));
+        }
+        samples_t.copy_(selected.to(torch::kInt32), /*non_blocking=*/true);
+    }
+
+    auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+    params.token_ids.copy_(output_tokens, /*non_blocking=*/true);
+    return GreedyOutput{};
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
