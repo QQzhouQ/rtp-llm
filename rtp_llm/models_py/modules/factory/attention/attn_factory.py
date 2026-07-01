@@ -156,23 +156,29 @@ def get_fmha_impl(
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            logging.warning(f"[DEBUG] {impl_class_name} disabled by config")
             continue
 
         # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        support_result = impl.support(attn_configs, attn_inputs)
+        logging.warning(f"[DEBUG] {impl_class_name}.support() = {support_result}, is_prefill={attn_inputs.is_prefill}, kv_cache={'set' if attn_inputs.kv_cache else 'None'}")
+        if not support_result:
             continue
 
         # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        par_result = impl.support_parallelism_config(parallelism_config)
+        logging.warning(f"[DEBUG] {impl_class_name}.support_parallelism_config() = {par_result}")
+        if not par_result:
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
+            logging.warning(f"[DEBUG] {impl_class_name} instantiated successfully")
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
 
         except Exception as e:
             # If instantiation fails, continue to next impl
-            logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
+            logging.warning(f"[DEBUG] Failed to instantiate {impl_class_name}: {e}")
             continue
     raise Exception(f"can not find mha type")
 

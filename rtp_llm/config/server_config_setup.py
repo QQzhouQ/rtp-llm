@@ -351,16 +351,15 @@ def setup_default_args(py_env_configs):
     if os.path.exists("/dev/alixpu") and py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
-    if py_env_configs.kv_cache_config.seq_size_per_block == 0:
-        py_env_configs.kv_cache_config.seq_size_per_block = 64
-
     try:
         import torch_npu
-        if torch.npu.is_available() and not py_env_configs.kv_cache_config.separate_kv_cache:
-            py_env_configs.kv_cache_config.separate_kv_cache = True
-            logging.info("set separate_kv_cache=True by default on Ascend NPU")
+        if torch.npu.is_available() and py_env_configs.kv_cache_config.seq_size_per_block == 0:
+            py_env_configs.kv_cache_config.seq_size_per_block = 128
+            logging.info("[Ascend] set SEQ_SIZE_PER_BLOCK 128 by default, as FIA paged attention requires block_size=128.")
     except ImportError:
         pass
+    if py_env_configs.kv_cache_config.seq_size_per_block == 0:
+        py_env_configs.kv_cache_config.seq_size_per_block = 64
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

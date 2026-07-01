@@ -3,29 +3,15 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 
-#if USING_ASCEND
-#include <torch_npu/csrc/aten/common/from_blob.h>
-#endif
-
 namespace rtp_llm {
-
-#if USING_ASCEND
-#define CACHE_FROM_BLOB at_npu::native::from_blob
-#else
-#define CACHE_FROM_BLOB torch::from_blob
-#endif
 
 // Initialization function
 bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                 torch::Tensor&            kv_cache_tensor,
                                 torch::Tensor&            kv_scale_tensor,
-                                void*                     cache_base_ptr,
-                                bool                      separate_kv_cache,
-                                void*                     v_cache_base_ptr) {
+                                void*                     cache_base_ptr) {
     config_            = config;
     cache_base_ptr_    = cache_base_ptr;
-    v_cache_base_ptr_  = v_cache_base_ptr;
-    separate_kv_cache_ = separate_kv_cache;
     data_type_         = config_.dtype;
 
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
@@ -59,10 +45,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     const size_t kv_block_stride_elems = config_.kv_block_stride_bytes / kv_elem_size;
     const size_t layer_block_bytes     = config_.block_num * config_.kv_block_stride_bytes;
 
-    auto kv_options = torch::TensorOptions()
-                          .dtype(dataTypeToTorchType(data_type_))
-                          .device(kv_cache_tensor.device())
-                          .requires_grad(false);
+    auto kv_dtype = dataTypeToTorchType(data_type_);
 
     kv_cache_tensor.fill_(0);
 
@@ -76,27 +59,25 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                                 config_.seq_size_per_block);
         const size_t stride_elems = kv_block_stride_elems / config_.seq_size_per_block;
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-            void* layer_ptr = static_cast<char*>(kv_cache_tensor.data_ptr())
-                            + static_cast<size_t>(layer_id) * layer_block_bytes;
-            layer_kv_tensors_.push_back(CACHE_FROM_BLOB(
-                layer_ptr,
-                {static_cast<int64_t>(config_.block_num),
-                 static_cast<int64_t>(config_.seq_size_per_block),
-                 static_cast<int64_t>(stride_elems)},
-                kv_options));
+            int64_t offset = static_cast<int64_t>(layer_id) * static_cast<int64_t>(layer_block_bytes);
+            auto layer_bytes = kv_cache_tensor.narrow(0, offset, static_cast<int64_t>(layer_block_bytes));
+            layer_kv_tensors_.push_back(layer_bytes.view(kv_dtype).reshape({
+                static_cast<int64_t>(config_.block_num),
+                static_cast<int64_t>(config_.seq_size_per_block),
+                static_cast<int64_t>(stride_elems)
+            }));
             RTP_LLM_LOG_DEBUG("Layer %d KV tensor shape: [%s] (MLA 3D)",
                               layer_id,
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
     } else {
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-            void* layer_ptr = static_cast<char*>(kv_cache_tensor.data_ptr())
-                            + static_cast<size_t>(layer_id) * layer_block_bytes;
-            layer_kv_tensors_.push_back(CACHE_FROM_BLOB(
-                layer_ptr,
-                {static_cast<int64_t>(config_.block_num),
-                 static_cast<int64_t>(kv_block_stride_elems)},
-                kv_options));
+            int64_t offset = static_cast<int64_t>(layer_id) * static_cast<int64_t>(layer_block_bytes);
+            auto layer_bytes = kv_cache_tensor.narrow(0, offset, static_cast<int64_t>(layer_block_bytes));
+            layer_kv_tensors_.push_back(layer_bytes.view(kv_dtype).reshape({
+                static_cast<int64_t>(config_.block_num),
+                static_cast<int64_t>(kv_block_stride_elems)
+            }));
             RTP_LLM_LOG_DEBUG("Layer %d tensor shape: [%s], elements: %ld",
                               layer_id,
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str(),
@@ -138,7 +119,7 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_scale_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;
-            layer_kv_scale_tensors_.push_back(CACHE_FROM_BLOB(
+            layer_kv_scale_tensors_.push_back(torch::from_blob(
                 layer_ptr,
                 {static_cast<int64_t>(config_.block_num),
                  static_cast<int64_t>(config_.seq_size_per_block),
@@ -165,7 +146,7 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             void* layer_ptr = static_cast<char*>(kv_scale_tensor.data_ptr())
                             + static_cast<size_t>(layer_id) * layer_block_bytes;
-            layer_kv_scale_tensors_.push_back(CACHE_FROM_BLOB(
+            layer_kv_scale_tensors_.push_back(torch::from_blob(
                 layer_ptr,
                 {static_cast<int64_t>(config_.block_num),
                  static_cast<int64_t>(scale_stride_elems)},
@@ -186,21 +167,12 @@ BlockAddrInfo MemoryLayoutStrategy::convertIndexToAddr(int layer_id, int block_i
     auto  blocks        = convertIndexToBuffer(layer_id, block_id);
     void* kv_addr       = blocks[0].addr;
     void* kv_scale_addr = nullptr;
-    void* v_addr        = nullptr;
 
-    if (separate_kv_cache_) {
-        // blocks[0] = K, blocks[1] = V (from createBasicBlockInfo)
-        if (blocks.size() >= 2) {
-            v_addr = blocks[1].addr;
-        }
-        if (config_.hasScale() && blocks.size() > 2) {
-            kv_scale_addr = blocks[2].addr;
-        }
-    } else if (config_.hasScale() && blocks.size() > 1) {
+    if (config_.hasScale() && blocks.size() > 1) {
         kv_scale_addr = blocks[1].addr;
     }
 
-    return {kv_addr, kv_scale_addr, v_addr};
+    return {kv_addr, kv_scale_addr};
 }
 
 std::vector<BlockInfo> MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id) const {
@@ -240,26 +212,6 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     auto& layer_tensor = layer_kv_tensors_[layer_id];
     void* kv_addr      = getBlockPtr(layer_tensor, block_id);
     auto  kv_info      = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
-
-    if (separate_kv_cache_) {
-        auto  k_info  = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.k_block_stride_bytes));
-        void* v_addr  = nullptr;
-        if (v_cache_base_ptr_) {
-            size_t offset = static_cast<char*>(kv_addr) - static_cast<char*>(cache_base_ptr_);
-            v_addr        = static_cast<char*>(v_cache_base_ptr_) + offset;
-        }
-        auto v_info = makeBlockInfo(layer_tensor, v_addr, static_cast<size_t>(config_.v_block_stride_bytes));
-
-        if (config_.hasScale()) {
-            auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
-            void* kv_scale_addr      = getBlockPtr(layer_scale_tensor, block_id);
-            auto  scale_info =
-                makeBlockInfo(layer_scale_tensor, kv_scale_addr, static_cast<size_t>(config_.kv_scale_stride_bytes));
-            return {k_info, v_info, scale_info};
-        }
-
-        return {k_info, v_info};
-    }
 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];

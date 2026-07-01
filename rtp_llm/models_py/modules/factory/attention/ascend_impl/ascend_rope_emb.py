@@ -36,8 +36,8 @@ class AscendRotaryEmbeddingOp:
             self.head_size * self.num_kv_heads,
         ], dim=-1)
         query = q.reshape(q.shape[0], self.num_heads, self.head_size)
-        key = k.reshape(k.shape[0], self.num_kv_heads, self.head_size)
-        value = v.reshape(v.shape[0], self.num_kv_heads, self.head_size)
+        key = k.reshape(k.shape[0], self.num_kv_heads, self.head_size).contiguous()
+        value = v.reshape(v.shape[0], self.num_kv_heads, self.head_size).contiguous()
 
         self._apply_rope(query, key, self.params)
 

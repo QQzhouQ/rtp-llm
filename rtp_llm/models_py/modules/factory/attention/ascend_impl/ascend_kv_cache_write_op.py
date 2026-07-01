@@ -5,7 +5,14 @@ from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class AscendKVCacheWriteOp:
-    """MHA KV Cache write using torch_npu._npu_reshape_and_cache."""
+    """MHA KV Cache write using torch_npu.npu_scatter_pa_kv_cache.
+
+    The combined KV buffer is [blocks, 2, seq, heads, dim] (BSND) after the
+    C++ getLayerCache reshape.  kv_cache_base[:, 0/1] yields [blocks, seq,
+    heads, dim] directly — no Python permute needed.  npu_scatter_pa_kv_cache
+    requires contiguous inputs, so we clone the strided views, scatter into
+    the clones, then copy back to propagate writes to the underlying buffer.
+    """
 
     def __init__(self, num_kv_heads, head_size, token_per_block):
         self.num_kv_heads = num_kv_heads
@@ -20,20 +27,26 @@ class AscendKVCacheWriteOp:
         if kv_cache is None:
             return
 
-        k_cache = kv_cache.k_cache_base
-        v_cache = kv_cache.v_cache_base
+        kv_base = kv_cache.kv_cache_base
+        # Already BSND [blocks, seq, heads, dim] from C++ reshape — no permute
+        k_view = kv_base[:, 0]
+        v_view = kv_base[:, 1]
 
         slot_mapping = self.params.slot_mapping
-        if slot_mapping.dtype != torch.int32:
+        if slot_mapping.dtype not in (torch.int32, torch.int64):
             slot_mapping = slot_mapping.to(torch.int32)
 
-        torch_npu._npu_reshape_and_cache(
-            key=key,
-            value=value,
-            key_cache=k_cache,
-            value_cache=v_cache,
-            slot_indices=slot_mapping,
+        key_c = key
+        value_c = value
+        k_c = k_view.clone()
+        v_c = v_view.clone()
+
+        torch_npu.npu_scatter_pa_kv_cache(
+            key_c, value_c, k_c, v_c, slot_mapping,
         )
+
+        k_view.copy_(k_c)
+        v_view.copy_(v_c)
 
     def _prepare_warmup_cache_indices(self, num_tokens, device):
         import torch
