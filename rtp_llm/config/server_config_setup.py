@@ -355,7 +355,7 @@ def setup_default_args(py_env_configs):
         import torch_npu
         if torch.npu.is_available() and py_env_configs.kv_cache_config.seq_size_per_block == 0:
             py_env_configs.kv_cache_config.seq_size_per_block = 128
-            logging.info("[Ascend] set SEQ_SIZE_PER_BLOCK 128 by default, as FIA paged attention requires block_size=128.")
+            logging.info("[Ascend] set SEQ_SIZE_PER_BLOCK 128 by default, as FIA v2 paged attention recommends block_size=128 for performance.")
     except ImportError:
         pass
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
