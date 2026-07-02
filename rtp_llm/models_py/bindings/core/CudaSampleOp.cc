@@ -13,7 +13,6 @@
 #include <memory>
 #elif USING_ASCEND
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
-#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p_custom.h"
 #endif
 
 using namespace std;
@@ -284,6 +283,12 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 #elif USING_ASCEND
+
+}  // namespace rtp_llm — close temporarily for torch_npu includes
+
+#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p_custom.h"
+
+namespace rtp_llm {  // reopen
 
 // ============================================================
 // Sample ops (Ascend) — NPU-accelerated implementation

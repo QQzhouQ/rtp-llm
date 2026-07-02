@@ -94,8 +94,6 @@ class GptModelBase(nn.Module):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        if inputs.attention_inputs.kv_cache is None and self.kv_cache is not None:
-            inputs.attention_inputs.kv_cache = self.kv_cache
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,
