@@ -5,13 +5,11 @@ from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class AscendKVCacheWriteOp:
-    """MHA KV Cache write using torch_npu.npu_scatter_pa_kv_cache.
+    """MHA KV Cache write using flat indexing on the merged KV buffer.
 
-    The combined KV buffer is [blocks, 2, seq, heads, dim] (BSND) after the
-    C++ getLayerCache reshape.  kv_cache_base[:, 0/1] yields [blocks, seq,
-    heads, dim] directly — no Python permute needed.  npu_scatter_pa_kv_cache
-    requires contiguous inputs, so we clone the strided views, scatter into
-    the clones, then copy back to propagate writes to the underlying buffer.
+    Avoids cloning the entire KV cache (which causes OOM on large caches).
+    Uses kv_base.reshape(-1, nkv, dim) + flat index assignment instead of
+    npu_scatter_pa_kv_cache (which requires contiguous inputs → clone).
     """
 
     def __init__(self, num_kv_heads, head_size, token_per_block):
@@ -28,35 +26,18 @@ class AscendKVCacheWriteOp:
             return
 
         kv_base = kv_cache.kv_cache_base
-        # Already BSND [blocks, seq, heads, dim] from C++ reshape — no permute
-        k_view = kv_base[:, 0]
-        v_view = kv_base[:, 1]
 
         slot_mapping = self.params.slot_mapping
         if slot_mapping.dtype not in (torch.int32, torch.int64):
             slot_mapping = slot_mapping.to(torch.int32)
 
-        key_c = key
-        value_c = value
-        k_c = k_view.clone()
-        v_c = v_view.clone()
+        slot_mapping_long = slot_mapping.long()
+        block_ids = slot_mapping_long // self.token_per_block
+        offsets = slot_mapping_long % self.token_per_block
 
-        torch_npu.npu_scatter_pa_kv_cache(
-            key_c, value_c, k_c, v_c, slot_mapping,
-        )
-
-        k_view.copy_(k_c)
-        v_view.copy_(v_c)
-
-    def _prepare_warmup_cache_indices(self, num_tokens, device):
-        import torch
-        batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-        positions = torch.arange(num_tokens, dtype=torch.int32, device=device)
-        max_num_pages = (num_tokens + self.token_per_block - 1) // self.token_per_block
-        kv_page_indices = positions // self.token_per_block
-        kv_page_indptr = torch.tensor([0, max_num_pages], dtype=torch.int32, device=device)
-        last_page_len = num_tokens % self.token_per_block
-        if last_page_len == 0:
-            last_page_len = self.token_per_block
-        kv_last_page_len = torch.tensor([last_page_len], dtype=torch.int32, device=device)
-        return batch_indices, positions, kv_page_indices, kv_page_indptr, kv_last_page_len, max_num_pages
+        page = self.token_per_block
+        kv_flat = kv_base.reshape(-1, self.num_kv_heads, self.head_size)
+        flat_idx_k = block_ids * (2 * page) + offsets
+        flat_idx_v = block_ids * (2 * page) + page + offsets
+        kv_flat[flat_idx_k] = key
+        kv_flat[flat_idx_v] = value

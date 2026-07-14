@@ -51,6 +51,10 @@ private:
     void replayGraph(int key);
     void replayDecode(int bs);
 
+    // KV-length-range helpers (multi-graph: one graph per (batch_size, kv_range))
+    int  selectKvRangeIdx(int seq_len) const;        // pick smallest range covering seq_len
+    static int64_t makeGraphKey(int bs, int kv_range_idx);  // composite key
+
     // Input preparation
     void prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int num_tokens);
@@ -84,10 +88,12 @@ private:
 
     c10::ScalarType model_data_type_;
 
-    // Bucket: batch_size -> AscendGraphInstance
+    // Bucket: (batch_size, kv_range_idx) -> AscendGraphInstance
+    // Key = batch_size * 100000 + kv_range_idx  (see makeGraphKey)
     std::vector<int>                                            capture_range_;
     std::vector<int>                                            decode_capture_batch_sizes_;
-    std::unordered_map<int, ascend_graph::AscendGraphInstance>  graph_instances_;
+    std::vector<int>                                            kv_length_ranges_;  // capture_kv_len per range
+    std::unordered_map<int64_t, ascend_graph::AscendGraphInstance>  graph_instances_;
 
     // Max-size shared capture mem hold (slices used per bucket)
     ascend_graph::AscendGraphMemHold capture_mem_hold_;
