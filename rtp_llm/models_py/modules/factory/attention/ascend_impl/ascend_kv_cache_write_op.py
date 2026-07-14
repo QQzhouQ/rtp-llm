@@ -10,8 +10,8 @@ class AscendKVCacheWriteOp:
     The combined KV buffer is [blocks, 2, seq, heads, dim] (BSND) after the
     C++ getLayerCache reshape.  kv_cache_base[:, 0/1] yields [blocks, seq,
     heads, dim] directly — no Python permute needed.  npu_scatter_pa_kv_cache
-    requires contiguous inputs, so we clone the strided views, scatter into
-    the clones, then copy back to propagate writes to the underlying buffer.
+    supports non-contiguous inputs, so we scatter directly into the strided
+    views without cloning.
     """
 
     def __init__(self, num_kv_heads, head_size, token_per_block):
@@ -36,17 +36,9 @@ class AscendKVCacheWriteOp:
         if slot_mapping.dtype not in (torch.int32, torch.int64):
             slot_mapping = slot_mapping.to(torch.int32)
 
-        key_c = key
-        value_c = value
-        k_c = k_view.clone()
-        v_c = v_view.clone()
-
         torch_npu.npu_scatter_pa_kv_cache(
-            key_c, value_c, k_c, v_c, slot_mapping,
+            key, value, k_view, v_view, slot_mapping,
         )
-
-        k_view.copy_(k_c)
-        v_view.copy_(v_c)
 
     def _prepare_warmup_cache_indices(self, num_tokens, device):
         import torch
