@@ -28,7 +28,7 @@ class AscendDecodeImpl(FMHAImplBase):
         self.kv_cache_write_op = AscendKVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
-            token_per_block=attn_inputs.kv_cache.seq_size_per_block,
+            token_per_block=attn_inputs.kv_cache.seq_size_per_block if attn_inputs.kv_cache else 128,
         )
 
         self.params = AscendAttnParams()
@@ -56,8 +56,8 @@ class AscendDecodeImpl(FMHAImplBase):
             head_dim * num_kv_heads,
         ], dim=-1)
         query = q.reshape(q.shape[0], num_heads, head_dim)
-        key = k.reshape(k.shape[0], num_kv_heads, head_dim)
-        value = v.reshape(v.shape[0], num_kv_heads, head_dim)
+        key = k.reshape(k.shape[0], num_kv_heads, head_dim).contiguous()
+        value = v.reshape(v.shape[0], num_kv_heads, head_dim).contiguous()
         return query, key, value
 
     def _update_rope_kv_write_params(self, device):
@@ -114,8 +114,7 @@ class AscendDecodeImpl(FMHAImplBase):
     def support(attn_configs, attn_inputs):
         return not attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
-               attn_inputs.kv_cache is not None and \
-               attn_inputs.kv_cache.separate_kv_cache
+               torch.npu.is_available()
 
 
 class AscendDecodeAttnOp:
@@ -163,8 +162,12 @@ class AscendDecodeAttnOp:
             self.context_lens = None
 
     def forward(self, q, kv_cache):
-        k_cache = kv_cache.k_cache_base.permute(0, 2, 1, 3).contiguous()
-        v_cache = kv_cache.v_cache_base.permute(0, 2, 1, 3).contiguous()
+        # kv_cache_base is BSND [blocks, seq, heads, dim] from C++ reshape.
+        # FIA v2 page attention supports 3D cache (blocknum, blocksize, H).
+        k_cache = kv_cache.kv_cache_base[:, 0].reshape(
+            kv_cache.kv_cache_base.shape[0], self.page_size, -1)
+        v_cache = kv_cache.kv_cache_base[:, 1].reshape(
+            kv_cache.kv_cache_base.shape[0], self.page_size, -1)
         block_table = self.block_table
         if block_table is not None and block_table.device.type != q.device.type:
             block_table = block_table.to(q.device)
@@ -179,17 +182,17 @@ class AscendDecodeAttnOp:
         if actual_seq_kv.device.type != q.device.type:
             actual_seq_kv = actual_seq_kv.to(q.device)
         atten_mask = self._get_causal_mask(q.device)
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query=q, key=k_cache, value=v_cache,
             atten_mask=atten_mask,
             block_table=block_table,
             input_layout="TND",
             block_size=self.page_size,
-            actual_seq_lengths=actual_seq_q,
-            actual_seq_lengths_kv=actual_seq_kv,
+            actual_seq_qlen=actual_seq_q,
+            actual_seq_kvlen=actual_seq_kv,
             num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
+            num_query_heads=self.num_heads,
+            softmax_scale=self.scale,
             sparse_mode=3,
         )
         return attn_output

@@ -20,17 +20,13 @@ namespace torch_ext {
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
 // When kernel_seq_size_per_block < seq_size_per_block the tensor is presented at
 // kernel-block granularity:
-//   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+//   MHA: [kernel_block_num, 2, kernel_seq_size_per_block, num_kv_heads, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-
-    // Separate K/V cache (Ascend NPU)
-    torch::Tensor k_cache_base;  // [blocks, seq_per_block, kv_heads, head_dim] NHD
-    torch::Tensor v_cache_base;  // [blocks, seq_per_block, kv_heads, head_dim] NHD
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -49,11 +45,6 @@ struct KVCache {
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType> layer_attn_types;
-
-    // Separate K/V cache (Ascend NPU)
-    bool                               separate_kv_cache = false;
-    std::vector<torch::Tensor>         k_cache_base_by_layer;
-    std::vector<torch::Tensor>         v_cache_base_by_layer;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -87,35 +78,17 @@ struct KVCache {
                 const int64_t physical_block_num = base.size(0);
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
 
-                if (separate_kv_cache) {
-                    auto k_base = k_cache_base_by_layer[idx];
-                    auto v_base = v_cache_base_by_layer[idx];
-                    if (num_kv_heads > 0 && head_dim > 0) {
-                        layer_cache.k_cache_base = k_base.reshape(
-                            {kernel_block_num,
-                             (int64_t)kernel_seq_size_per_block,
-                             (int64_t)num_kv_heads,
-                             (int64_t)head_dim});
-                        layer_cache.v_cache_base = v_base.reshape(
-                            {kernel_block_num,
-                             (int64_t)kernel_seq_size_per_block,
-                             (int64_t)num_kv_heads,
-                             (int64_t)head_dim});
-                    } else {
-                        layer_cache.k_cache_base = k_base;
-                        layer_cache.v_cache_base = v_base;
-                    }
-                } else if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
+                if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
                 } else if (num_kv_heads > 0 && head_dim > 0) {
-                    // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
+                    // MHA layout: [kernel_block_num, 2, kernel_seq_size_per_block, num_kv_heads, head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               2,
-                                                              (int64_t)num_kv_heads,
                                                               (int64_t)kernel_seq_size_per_block,
+                                                              (int64_t)num_kv_heads,
                                                               (int64_t)head_dim});
                 } else {
                     layer_cache.kv_cache_base = base;
