@@ -1,6 +1,5 @@
 import torch
 import torch_npu
-import weakref
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params import (
     AscendAttnParams,
@@ -12,16 +11,10 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.models_py.modules.factory.attention import common
 
 
-def _weak_ref(t):
-    if t is None:
-        return None
-    return weakref.ref(t)
-
-
 class AscendDecodeImpl(FMHAImplBase):
     """Ascend MHA Decode using FIA v2.
 
-    Eager: FIA v2 + .reshape() (contiguous copy) — correct precision.
+    Eager: FIA v2 + .reshape() (contiguous copy).
     Graph: FIA v2 + graph_task_group + graph_task_update (vllm-ascend pattern).
     """
 
@@ -105,9 +98,6 @@ class AscendDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare(attn_inputs)
         self.attn_inputs = attn_inputs
 
-    def set_capture_kv_len(self, kv_len):
-        self.fmha_impl.set_capture_kv_len(kv_len)
-
     def prepare_cuda_graph(self, attn_inputs):
         """Called by AscendGraphRunner::prepareInputs() before each replay."""
         self.attn_inputs = attn_inputs
@@ -175,21 +165,14 @@ class AscendDecodeAttnOp:
         self.scale = attn_configs.q_scaling * self.head_dim ** -0.5
         self.page_size = attn_inputs.kv_cache.seq_size_per_block if \
                          attn_inputs.kv_cache else 128
-        self.max_seq_len = getattr(attn_configs, 'max_seq_len', 0) or 0
         self.block_table = None
         self.context_lens = None
 
-        # Multi-capture-group: {capture_kv_len: {'handles': [], 'refs': []}}
-        self._capture_groups = {}
-        self._current_capture_kv_len = None
+        self._graph_handles = []
+        self._graph_refs = []
 
     def set_params(self, params):
         self.params = params
-
-    def set_capture_kv_len(self, kv_len):
-        self._current_capture_kv_len = kv_len
-        if kv_len not in self._capture_groups:
-            self._capture_groups[kv_len] = {'handles': [], 'refs': []}
 
     def prepare(self, attn_inputs):
         if getattr(attn_inputs, "is_cuda_graph", False):
@@ -234,19 +217,18 @@ class AscendDecodeAttnOp:
         atten_mask = self._get_causal_mask(q.device)
 
         if AscendDecodeAttnOp._shared_workspace is None:
-            capture_kv_len = self._current_capture_kv_len or self.page_size
             dummy_k = torch.empty(4, self.page_size, self.num_kv_heads * self.head_dim,
                                   dtype=q.dtype, device=q.device)
             dummy_v = torch.empty(4, self.page_size, self.num_kv_heads * self.head_dim,
                                   dtype=q.dtype, device=q.device)
             dummy_q = torch.empty(1, self.num_heads, self.head_dim,
                                   dtype=q.dtype, device=q.device)
-            dummy_bt = torch.zeros(1, max(1, capture_kv_len // self.page_size), dtype=torch.int32, device=q.device)
+            dummy_bt = torch.zeros(1, 1, dtype=torch.int32, device=q.device)
             AscendDecodeAttnOp._shared_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=dummy_q, key=dummy_k, value=dummy_v, atten_mask=atten_mask,
                 block_table=dummy_bt, input_layout="TND",
                 block_size=self.page_size,
-                actual_seq_qlen=[1], actual_seq_kvlen=[capture_kv_len],
+                actual_seq_qlen=[1], actual_seq_kvlen=[self.page_size],
                 num_key_value_heads=self.num_kv_heads,
                 num_query_heads=self.num_heads,
                 softmax_scale=self.scale, sparse_mode=3)
@@ -270,9 +252,8 @@ class AscendDecodeAttnOp:
                 softmax_scale=self.scale, sparse_mode=3)
             return attn_output
 
-        capture_kv_len = self._current_capture_kv_len or self.page_size
         actual_seq_q = list(range(1, batch_size + 1))
-        actual_seq_kv = [capture_kv_len]
+        actual_seq_kv = [self.page_size]
         stream = torch.npu.current_stream()
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -288,30 +269,23 @@ class AscendDecodeAttnOp:
             out=[out, lse])
         handle = torch.npu.graph_task_group_end(stream)
 
-        group = self._capture_groups.setdefault(capture_kv_len, {'handles': [], 'refs': []})
-        group['handles'].append(handle)
-        group['refs'].append((
-            _weak_ref(q), _weak_ref(k_cache), _weak_ref(v_cache),
-            _weak_ref(block_table), _weak_ref(atten_mask),
-            _weak_ref(out), _weak_ref(lse)))
+        self._graph_handles.append(handle)
+        self._graph_refs.append((
+            q, k_cache, v_cache,
+            block_table, atten_mask,
+            out, lse))
         return out
 
     def update_graph_fia(self, ctx_list, batch_size):
-        capture_kv_len = self._current_capture_kv_len
-        if capture_kv_len is None:
-            return
-        group = self._capture_groups.get(capture_kv_len)
-        if group is None or not group['handles']:
+        if not self._graph_handles:
             return
         if AscendDecodeAttnOp._shared_update_stream is None:
             AscendDecodeAttnOp._shared_update_stream = torch.npu.Stream()
         us = AscendDecodeAttnOp._shared_update_stream
         actual_seq_q = list(range(1, batch_size + 1))
         with torch.npu.stream(us):
-            for i, handle in enumerate(group['handles']):
-                wq, wk, wv, wbt, wmask, wout, wlse = group['refs'][i]
-                q = wq(); k_cache = wk(); v_cache = wv()
-                block_table = wbt(); atten_mask = wmask(); out = wout(); lse = wlse()
+            for i, handle in enumerate(self._graph_handles):
+                q, k_cache, v_cache, block_table, atten_mask, out, lse = self._graph_refs[i]
                 if q is None or k_cache is None or out is None:
                     continue
                 torch.npu.graph_task_update_begin(us, handle)

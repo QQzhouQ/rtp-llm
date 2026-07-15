@@ -15,7 +15,6 @@ struct CudaGraphState {
     int current_real_graph_bs{1};       // for decode
     int current_real_graph_seq_len{1};  // for prefill
     int seq_len_sum{0};
-    int current_kv_range_idx{0};        // Ascend: KV-length range index for multi-graph
 };
 
 struct GraphParams {

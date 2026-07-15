@@ -92,7 +92,7 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     // The workspace must be > 2 * blocks * page_size * HD * elem_size (CANN
     // contiguous-size check), so the reserve must be large enough to leave
     // room for both the workspace and the graph mempool after KV cache alloc.
-    const auto ascend_runtime_required = 12L * 1024 * 1024 * 1024;  // 12 GiB
+    const auto ascend_runtime_required = 8L * 1024 * 1024 * 1024;  // 8 GiB
     updateMemoryIfNeeded(reserve_runtime_mem_bytes, ascend_runtime_required, "Ascend graph mode workspace");
 #endif
 
