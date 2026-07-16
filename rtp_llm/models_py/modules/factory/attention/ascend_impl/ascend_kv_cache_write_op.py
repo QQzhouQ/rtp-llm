@@ -39,16 +39,3 @@ class AscendKVCacheWriteOp:
         torch_npu.npu_scatter_pa_kv_cache(
             key, value, k_view, v_view, slot_mapping,
         )
-
-    def _prepare_warmup_cache_indices(self, num_tokens, device):
-        import torch
-        batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-        positions = torch.arange(num_tokens, dtype=torch.int32, device=device)
-        max_num_pages = (num_tokens + self.token_per_block - 1) // self.token_per_block
-        kv_page_indices = positions // self.token_per_block
-        kv_page_indptr = torch.tensor([0, max_num_pages], dtype=torch.int32, device=device)
-        last_page_len = num_tokens % self.token_per_block
-        if last_page_len == 0:
-            last_page_len = self.token_per_block
-        kv_last_page_len = torch.tensor([last_page_len], dtype=torch.int32, device=device)
-        return batch_indices, positions, kv_page_indices, kv_page_indptr, kv_last_page_len, max_num_pages

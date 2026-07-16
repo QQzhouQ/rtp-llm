@@ -157,6 +157,7 @@ bool AscendGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inpu
         return false;
     }
     state.current_real_graph_bs = *it;
+
     if (inputs.attention_inputs.is_prefill) {
         state.seq_len_sum = inputs.attention_inputs.input_lengths.sum(0).item<int>();
     } else {
@@ -174,7 +175,7 @@ bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& stat
     // Speculative decoding: target verify path
     if (is_target_verify_) {
         if (inputs.attention_inputs.is_target_verify) {
-            return tryGetRealGraphDecodeBatchSize(inputs, state);
+    return tryGetRealGraphDecodeBatchSize(inputs, state);
         }
         return false;
     }
@@ -220,8 +221,10 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
         torch::full({int(max_bs_)}, num_tokens_per_bs, options_cpu_int32_).pin_memory();
     inputs.attention_inputs.input_lengths_d = inputs.attention_inputs.input_lengths.to(options_npu_int32_.device());
     // sequence_lengths [batch_size, int32] pinned host
+    // Use page_size as capture context_len: covers typical short prompts,
+    // keeps ATB workspace small, avoids copy_stream sync with large ctx.
     inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
+    inputs.attention_inputs.sequence_lengths.fill_(seq_size_per_block_ - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
     const int64_t max_kv_blocks =
@@ -231,6 +234,14 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_npu_int32_);
     inputs.attention_inputs.kv_cache_kernel_block_id_host =
+        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    // compute_ascend_attn_params() reads kv_cache_block_id_host (not the kernel
+    // variant) to derive slot_mapping. Allocate it alongside the kernel version
+    // so the capture warmup forward produces a non-empty slot_mapping instead
+    // of crashing npu_scatter_pa_kv_cache with a size mismatch.
+    inputs.attention_inputs.kv_cache_block_id_device =
+        torch::zeros({int(max_bs_), max_blocks}, options_npu_int32_);
+    inputs.attention_inputs.kv_cache_block_id_host =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
 
     const auto layer_num = kv_cache_layer_to_group_.size();
@@ -269,7 +280,7 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
     inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_npu_int32_);
+    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::full({int(max_bs_)}, seq_size_per_block_, options_npu_int32_);
     inputs.attention_inputs.decode_cu_seqlens_d       = torch::arange(0, max_bs_ + 1, 1, options_npu_int32_);
 }
 
@@ -396,6 +407,7 @@ void AscendGraphRunner::initCapture() {
     // Warm-up forward to settle output dtype / kernel lazy init.
     auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
     RTP_LLM_LOG_INFO("AscendGraphRunner initCapture warmup forward start");
+
     py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
     RTP_LLM_LOG_INFO("AscendGraphRunner initCapture warmup forward end");
     output = torch::zeros({max_num_token_, hidden_size_}, options_npu_float_);
@@ -476,7 +488,7 @@ void AscendGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Ascend graph Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
-            ascend_graph::graphCaptureBegin(graph, shared_graph_pool_, ascend_graph::GraphCaptureMode::ThreadLocal);
+            ascend_graph::graphCaptureBegin(graph, shared_graph_pool_, ascend_graph::GraphCaptureMode::Relaxed);
             ascend_graph::AscendGraphCaptureGuard capture_guard;
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
@@ -532,13 +544,18 @@ void AscendGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 static void copyTensorSlice(const torch::Tensor& src, torch::Tensor& dst) {
     if (!src.defined() || !dst.defined() || src.numel() <= 0) return;
     RTP_LLM_PROFILE_SCOPE("ascend_graph.copyTensorSlice");
-    if (src.dim() < 2) {
-        dst.slice(0, 0, src.size(0)).copy_(src, /*non_blocking=*/true);
+    auto s = src;
+    while (s.dim() > dst.dim() && s.size(0) == 1) {
+        s = s.squeeze(0);
+    }
+    if (s.dim() < 2) {
+        dst.slice(0, 0, s.size(0)).copy_(s, /*non_blocking=*/true);
         return;
     }
-    // 2-D: copy row-by-row to handle stride mismatch (copySmallerIntoLarger semantics).
-    const int64_t rows = src.size(0);
-    dst.slice(0, 0, rows).copy_(src.slice(0, 0, rows), /*non_blocking=*/true);
+    int64_t rows = std::min(s.size(0), dst.size(0));
+    int64_t cols = std::min(s.size(1), dst.size(1));
+    dst.slice(0, 0, rows).slice(1, 0, cols).copy_(
+        s.slice(0, 0, rows).slice(1, 0, cols), /*non_blocking=*/true);
 }
 
 void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -558,6 +575,10 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     // block IDs from polluting subsequent batches (same rationale as CudaGraphRunner).
     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host.fill_(0);
+    if (py_model_inputs.attention_inputs.kv_cache_block_id_device.defined())
+        py_model_inputs.attention_inputs.kv_cache_block_id_device.fill_(0);
+    if (py_model_inputs.attention_inputs.kv_cache_block_id_host.defined())
+        py_model_inputs.attention_inputs.kv_cache_block_id_host.fill_(0);
     for (auto& tbl_d : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group) {
         tbl_d.fill_(0);
     }
@@ -577,6 +598,8 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     copyTensorSlice(inputs.attention_inputs.input_lengths_d, py_model_inputs.attention_inputs.input_lengths_d);
     copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
+    copyTensorSlice(inputs.attention_inputs.kv_cache_block_id_device,
+                    py_model_inputs.attention_inputs.kv_cache_block_id_device);
 
     // Decode-only fields
     copyTensorSlice(inputs.attention_inputs.prefix_lengths_d, py_model_inputs.attention_inputs.prefix_lengths_d);
@@ -615,6 +638,8 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     // Host block tables (Ascend attention reads the host version)
     copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host);
+    copyTensorSlice(inputs.attention_inputs.kv_cache_block_id_host,
+                    py_model_inputs.attention_inputs.kv_cache_block_id_host);
     if (inputs.attention_inputs.kv_cache_layer_to_group.defined()
         && inputs.attention_inputs.kv_cache_layer_to_group.numel() > 0) {
         py_model_inputs.attention_inputs.kv_cache_layer_to_group.copy_(
@@ -654,6 +679,12 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
             0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host.slice(
             0, state.current_batch_size, max_bs_).fill_(0);
+        if (py_model_inputs.attention_inputs.kv_cache_block_id_device.defined())
+            py_model_inputs.attention_inputs.kv_cache_block_id_device.slice(
+                0, state.current_batch_size, max_bs_).fill_(0);
+        if (py_model_inputs.attention_inputs.kv_cache_block_id_host.defined())
+            py_model_inputs.attention_inputs.kv_cache_block_id_host.slice(
+                0, state.current_batch_size, max_bs_).fill_(0);
         for (auto& tbl_d : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group) {
             tbl_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
@@ -661,6 +692,11 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
             tbl_h.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
     }
+
+    // Compute sequence_lengths_plus_1_d from sequence_lengths (engine doesn't populate it)
+    py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, state.current_batch_size) =
+        py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
+            .to(options_npu_int32_.device()) + 1;
 
     // -------- Update attention impl with the freshly-copied inputs --------
     {
@@ -681,8 +717,6 @@ PyModelOutputs AscendGraphRunner::forward(const PyModelInputs& inputs, CudaGraph
         replayDecode(state.current_real_graph_bs);
     }
     // Read output from the persistent buffer slice (stable address across replays).
-    // Clone so callers get an independent tensor that won't be overwritten by
-    // the next prepareInputs (mirrors PyWrappedModel's normal-forward clone path).
     outputs.hidden_states =
         graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
             0, 0, state.seq_len_sum).clone();
