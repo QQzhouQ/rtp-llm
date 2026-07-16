@@ -107,6 +107,25 @@ class AscendDecodeImpl(FMHAImplBase):
         ctx_list = (seq_lens.to(torch.int32) + 1).tolist()
         self.fmha_impl.update_graph_fia(ctx_list, batch_size)
 
+    def prepare_cuda_graph(self, attn_inputs):
+        """Refresh attention operator state from the persistent attn_inputs buffer.
+
+        Called by AscendGraphRunner::prepareInputs() before each replay. The
+        attn_inputs here reference the persistent device/host tensors that
+        were captured into the ACL graph, so any in-place updates we make to
+        derived tensors (context_lens, etc.) are picked up at replay time.
+
+        We deliberately *re-bind* the derived tensors to the freshly-copied
+        attn_inputs so the next forward call reads the latest data; the
+        captured graph kernel reads the underlying persistent storage whose
+        address has not changed.
+        """
+        self.attn_inputs = attn_inputs
+        # block_table and context_lens are derived from the (now updated)
+        # persistent attn_inputs. The fmha_impl.forward() reads them lazily.
+        self.fmha_impl.prepare(attn_inputs)
+        # RoPE / KV-write slot_mapping depends on attn_inputs; recompute on next forward.
+
     def forward(self, qkv, kv_cache, layer_idx=0):
         is_graph = getattr(self.attn_inputs, "is_cuda_graph", False)
 

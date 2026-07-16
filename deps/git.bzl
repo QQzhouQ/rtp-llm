@@ -122,10 +122,9 @@ def git_deps():
         build_file = clean_dep("@rtp_llm//3rdparty/zlib:zlib.BUILD"),
         strip_prefix = "zlib-1.2.11",
         urls = [
-            "file:///home/w30067200/rtp-llm/deps/zlib-1.2.11.tar.gz",
             "https://www.zlib.net/fossils/zlib-1.2.11.tar.gz",
         ],
-        sha256 = "892842ad80be5117652dc9526ea0d201f81c94f0f29a90f010434eb6d8c0a207",
+        sha256 = "c3e5e9fdd5004dcb542feda5ee4f0ff0744628baf8ed2dd5d66f8ca1197cb1a1",
     )
 
     git_repository(
