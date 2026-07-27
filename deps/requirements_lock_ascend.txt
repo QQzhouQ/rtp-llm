@@ -335,7 +335,7 @@ timm==0.9.12
     # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_base.txt
 tokenizers==0.21.4
     # via transformers
-torch @ https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_aarch64.whl
+torch @ https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl
     # via
     #   -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_ascend.txt
     #   bitsandbytes
@@ -343,7 +343,7 @@ torch @ https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp
     #   timm
     #   torch-npu
     #   torchvision
-torch-npu @ https://files.pythonhosted.org/packages/66/79/d169a3b085c07d967053c629f26559dc7d757bbb2fe11f3ab38cea90a20e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_aarch64.whl
+torch-npu @ https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl
     # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_ascend.txt
 torchvision==0.24.0
     # via timm
