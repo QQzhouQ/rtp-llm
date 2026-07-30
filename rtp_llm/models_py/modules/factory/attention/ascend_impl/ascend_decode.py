@@ -206,47 +206,6 @@ class AscendDecodeAttnOp:
             return self._forward_fia_graph(q, kv_cache, block_table, context_lens)
         return self._forward_fia(q, kv_cache, block_table, context_lens)
 
-    def _ensure_workspace(self, q, kv_cache):
-        # 在 warmup(_forward_fia) 阶段就把 FIA v2 workspace 预分配好，作为
-        # graph capture 之外的稳定 buffer。若在 _forward_fia_graph 里懒分配
-        # （即处于 ACL graph capture 期间），新版本 CANN 会报
-        # "workspaceSize must be larger than contiguous size"。这里提前分配可
-        # 避免该问题。
-        if AscendDecodeAttnOp._shared_workspace is not None:
-            return
-        atten_mask = self._get_causal_mask(q.device)
-        batch_size = q.shape[0]
-        blocks = kv_cache.kv_cache_base.shape[0]
-        HD = self.num_kv_heads * self.head_dim
-        # 用真实 capture 维度查询 workspace（batch_size、真实 cache 形状、
-        # actual_seq_kvlen 每批一个），让 CANN 返回该版本实际需要的尺寸。
-        # 旧代码用 batch=1 的极小 dummy 再手加 kv_contiguous_bytes 估算，
-        # 在新版 CANN 上会偏小，触发 "workspaceSize must be larger than contiguous size"。
-        dummy_q = torch.empty(batch_size, self.num_heads, self.head_dim,
-                              dtype=q.dtype, device=q.device)
-        dummy_k = torch.empty(blocks, self.page_size, HD,
-                              dtype=q.dtype, device=q.device)
-        dummy_v = torch.empty(blocks, self.page_size, HD,
-                              dtype=q.dtype, device=q.device)
-        dummy_bt = torch.zeros(batch_size, 1, dtype=torch.int32, device=q.device)
-        AscendDecodeAttnOp._shared_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-            query=dummy_q, key=dummy_k, value=dummy_v, atten_mask=atten_mask,
-            block_table=dummy_bt, input_layout="TND",
-            block_size=self.page_size,
-            actual_seq_qlen=list(range(1, batch_size + 1)),
-            actual_seq_kvlen=[self.page_size] * batch_size,
-            num_key_value_heads=self.num_kv_heads,
-            num_query_heads=self.num_heads,
-            softmax_scale=self.scale, sparse_mode=3)
-        max_ws_bytes = AscendDecodeAttnOp._shared_workspace.numel() * AscendDecodeAttnOp._shared_workspace.element_size()
-        kv_contiguous_bytes = 2 * blocks * self.page_size * HD * q.element_size()
-        # CANN 对 paged KV 做 contiguous 化时需要 K、V 各一份连续 buffer + 中间量，
-        # 经验上约为 2×kv_contig。单倍 (3.76GB) 实测仍触发 "workspaceSize must be
-        # larger than contiguous size"，故按 2× 分配。
-        ws_bytes = max_ws_bytes + 2 * kv_contiguous_bytes + 1024 * 1024
-        AscendDecodeAttnOp._shared_workspace = torch.empty(ws_bytes // q.element_size(),
-                                            dtype=q.dtype, device=q.device)
-
     def _forward_fia_graph(self, q, kv_cache, block_table, context_lens):
         kv_base = kv_cache.kv_cache_base
         k_cache = kv_base[:, 0].reshape(kv_base.shape[0], self.page_size, -1)
@@ -257,7 +216,19 @@ class AscendDecodeAttnOp:
         lse = torch.empty(1, dtype=q.dtype, device=q.device)
         atten_mask = self._get_causal_mask(q.device)
 
-        self._ensure_workspace(q, kv_cache)
+        if AscendDecodeAttnOp._shared_workspace is None:
+            AscendDecodeAttnOp._shared_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=q, key=k_cache, value=v_cache,
+                atten_mask=atten_mask, block_table=block_table,
+                input_layout="TND", block_size=self.page_size,
+                actual_seq_qlen=list(range(1, batch_size + 1)),
+                actual_seq_kvlen=[self.page_size] * batch_size,
+                num_key_value_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
+                softmax_scale=self.scale, sparse_mode=3)
+            ws_bytes = AscendDecodeAttnOp._shared_workspace.numel() * AscendDecodeAttnOp._shared_workspace.element_size()
+            AscendDecodeAttnOp._shared_workspace = torch.empty(ws_bytes // q.element_size(),
+                                                dtype=q.dtype, device=q.device)
 
         if not torch.npu.is_current_stream_capturing():
             actual_seq_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=q.device)
@@ -324,7 +295,6 @@ class AscendDecodeAttnOp:
         us.synchronize()
 
     def _forward_fia(self, q, kv_cache, block_table, context_lens):
-        self._ensure_workspace(q, kv_cache)
         kv_base = kv_cache.kv_cache_base
         k_cache = kv_base[:, 0].reshape(kv_base.shape[0], self.page_size, -1)
         v_cache = kv_base[:, 1].reshape(kv_base.shape[0], self.page_size, -1)
