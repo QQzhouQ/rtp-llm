@@ -3,7 +3,7 @@
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
@@ -33,23 +33,22 @@ _DATA_DIR_UPDATE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..
 _DATA_DIR_UPDATE = os.path.abspath(_DATA_DIR_UPDATE)
 
 
-def _load_gpu_case(filename: str) -> dict:
-    """Load a .pt file containing GPU golden inputs/outputs."""
-    path = os.path.join(_DATA_DIR, filename)
-    data = torch.load(path, map_location="cpu", weights_only=False)
-    return {
-        "x": data["inputs"]["x"].contiguous(),
-        "weight": data["inputs"]["weight"].contiguous(),
-        "bias": data["inputs"].get("bias"),
-        "conv_states": data["inputs"].get("conv_states"),
-        "query_start_loc": data["inputs"]["query_start_loc"],
-        "y_expected": data["outputs"].contiguous(),
-    }
+def _restore_strided_tensor(saved_data: torch.Tensor, meta: dict) -> torch.Tensor:
+    """Restore a tensor's original (possibly non-contiguous) stride.
 
+    ``.pt`` files store tensors in contiguous form, losing the original
+    stride information.  The GPU dump also saves ``input_meta`` which
+    records the original shape / stride / dtype / contiguous flag.
 
-def _gpu_x_to_npu_varlen(x_gpu: torch.Tensor) -> torch.Tensor:
-    """Convert GPU x layout (D, S) to NPU varlen layout (cu_seqlen, dim)."""
-    return x_gpu.contiguous().T.contiguous()
+    If the original tensor was contiguous, return ``saved_data`` directly.
+    Otherwise allocate a strided tensor and copy the data in.
+    """
+    if meta.get("contiguous", True):
+        return saved_data
+    dtype = getattr(torch, meta["dtype"].replace("torch.", ""))
+    tensor = torch.empty_strided(meta["shape"], meta["stride"], dtype=dtype)
+    tensor.copy_(saved_data)
+    return tensor
 
 
 def _gpu_weight_to_npu(weight_gpu: torch.Tensor) -> torch.Tensor:
@@ -74,40 +73,84 @@ def _make_zero_conv_states(batch: int, width: int, dim: int, dtype: torch.dtype,
     return torch.zeros(batch, width - 1, dim, dtype=dtype, device=device)
 
 
+def _load_gpu_case(filename: str) -> dict:
+    """Load a .pt file containing GPU golden inputs/outputs.
+
+    Restores the original (non-contiguous) stride of x and conv_states
+    using the ``input_meta`` saved alongside the data.
+    """
+    path = os.path.join(_DATA_DIR, filename)
+    data = torch.load(path, map_location="cpu", weights_only=False)
+
+    inputs = data["inputs"]
+    meta = data.get("input_meta", {})
+
+    # Restore original stride for x (GPU layout: (dim, seqlen), channel-last)
+    x_saved = inputs["x"]
+    x_meta = meta.get("x", {})
+    x_gpu = _restore_strided_tensor(x_saved, x_meta) if x_meta else x_saved.contiguous()
+
+    # Restore original stride for conv_states if present (GPU paged layout:
+    # (num_pages, dim, state_len), channel-last with dim-axis stride=1)
+    conv_states_saved = inputs.get("conv_states")
+    cs_meta = meta.get("conv_states", {})
+    if conv_states_saved is not None and cs_meta:
+        conv_states = _restore_strided_tensor(conv_states_saved, cs_meta)
+    else:
+        conv_states = conv_states_saved
+
+    return {
+        "x": x_gpu,
+        "weight": inputs["weight"].contiguous(),
+        "bias": inputs.get("bias"),
+        "conv_states": conv_states,
+        "query_start_loc": inputs["query_start_loc"],
+        "y_expected": data["outputs"].contiguous(),
+    }
+
+
 def _load_gpu_update_case(filename: str) -> dict:
     """Load a .pt file containing GPU golden data for update/decode mode.
 
-    The GPU data uses a nested ``inputs``/``outputs``/``inplace_outputs``
-    structure with paged ``conv_state``. Returns a flat dict in the form
-    consumed by the test methods.
+    Restores the original (non-contiguous) stride of conv_state using the
+    ``input_meta`` saved alongside the data.  The GPU data uses a nested
+    ``inputs``/``outputs``/``inplace_outputs`` structure with paged
+    ``conv_state``.
     """
     path = os.path.join(_DATA_DIR_UPDATE, filename)
     data = torch.load(path, map_location="cpu", weights_only=False)
 
     inputs = data["inputs"]
+    meta = data.get("input_meta", {})
 
-    # x: GPU shape (1, dim, 1) → NPU decode expects (batch, dim)
     x_gpu = inputs["x"].contiguous()
-    # weight: GPU shape (dim, width) → NPU expects (width, dim)
     weight_gpu = inputs["weight"].contiguous()
-    # y: GPU shape (1, dim, 1) → NPU decode output is (1, dim)
     y_gpu = data["outputs"].contiguous()
 
     dim, width = weight_gpu.shape  # GPU: (D, W)
 
-    # Extract the relevant cache line from GPU paged conv_state.
-    # The GPU stores conv_state in paged layout (num_pages, dim, state_len).
-    # ``block_map`` maps the sequence to a physical page.
-    conv_state_page = inputs["conv_state"]
+    # Restore the full paged conv_state with original stride.
+    # GPU layout: (num_pages, dim, state_len) stride=(1048576, 1, 8192)
+    # — channel-last with dim-axis stride=1.
+    conv_state_saved = inputs["conv_state"]
+    cs_meta = meta.get("conv_state", {})
+    if cs_meta:
+        conv_state_restored = _restore_strided_tensor(conv_state_saved, cs_meta)
+    else:
+        conv_state_restored = conv_state_saved
+
     block_map = inputs["block_map"]
     page_idx = int(block_map[0, 0].item())
 
-    # Extracted page is (dim, state_len=3); transpose to NPU format
-    # (num_cache_lines=1, state_len=3, dim).
-    page_state = conv_state_page[page_idx].contiguous()           # (dim, state_len)
-    conv_states_npu = page_state.T.contiguous().unsqueeze(0)      # (1, state_len, dim)
+    # Transpose the full paged conv_state to NPU format
+    # (num_pages, state_len, dim), preserving the non-contiguous stride.
+    # GPU: (293, 8192, 3) stride=(1048576, 1, 8192)
+    # After .transpose(1,2): (293, 3, 8192) stride=(1048576, 8192, 1)
+    # — non-contiguous, dim axis (last) stride=1.
+    conv_states_npu = conv_state_restored.transpose(1, 2)   # (num_pages, state_len, dim)
 
-    # NPU conv state is mutated in-place; clone for expected comparison.
+    # Expected conv_state after in-place update (GPU layout (dim, state_len)).
+    # Extract the relevant page and transpose to NPU format for comparison.
     conv_states_expected = data["inplace_outputs"]["conv_state"][page_idx].contiguous()
     conv_states_expected_npu = conv_states_expected.T.contiguous().unsqueeze(0)
 
@@ -115,10 +158,10 @@ def _load_gpu_update_case(filename: str) -> dict:
         "x_npu": x_gpu.squeeze(-1).contiguous(),                 # (1, dim)
         "weight_npu": _gpu_weight_to_npu(weight_gpu),            # (width, dim)
         "bias": None,
-        "conv_states_npu": conv_states_npu,                      # (1, state_len, dim)
-        "conv_states_expected": conv_states_expected_npu,        # after in-place update
+        "conv_states_npu": conv_states_npu,                      # (num_pages, state_len, dim) non-contiguous
+        "page_idx": page_idx,                                    # cache index for this sequence
+        "conv_states_expected": conv_states_expected_npu,        # (1, state_len, dim) after in-place update
         "y_expected_npu": y_gpu.squeeze(-1).contiguous(),        # (1, dim)
-        # activation is read from GPU metadata
         "activation_mode": 1 if inputs.get("activation") in ("silu", "swish") else 0,
     }
 
@@ -150,26 +193,31 @@ class TestCausalConv1dGpuGolden(unittest.TestCase):
     # Case 1: prefill_first_seq2047
     #   Single sequence of 2047 tokens, dim=8192, width=4, no bias, no initial states.
     #   GPU activation = SiLU (activation_mode=1).
+    #   x is non-contiguous on GPU (channel-last, stride=(1, 12288)).
+    #   NPU AutoContiguous handles x; conv_states is zero-initialized.
     # ------------------------------------------------------------------
     def test_prefill_first_seq2047(self):
         case = _load_gpu_case("prefill_first_seq2047.pt")
 
-        x_gpu = case["x"]           # (8192, 2047) float16
+        x_gpu = case["x"]           # (8192, 2047) — non-contiguous, stride=(1, 12288)
         weight_gpu = case["weight"] # (8192, 4)    float16
         qsl = case["query_start_loc"].to(torch.int64)  # [0, 2047]
+
+        # Verify x is restored as non-contiguous (channel-last on GPU)
+        self.assertFalse(x_gpu.is_contiguous(), "x should be non-contiguous after stride restoration")
+        self.assertEqual(x_gpu.stride(), (1, 12288), "x stride should match GPU input_meta")
 
         dim, width = weight_gpu.shape
         batch = int(qsl.shape[0] - 1)
 
-        # Convert to NPU format
-        x_npu = _gpu_x_to_npu_varlen(x_gpu)          # (S=2047, D=8192)
-        weight_npu = _gpu_weight_to_npu(weight_gpu)   # (W=4, D=8192)
+        # Convert to NPU format — .T preserves the channel-last stride
+        x_npu = x_gpu.T              # (2047, 8192) stride=(12288, 1) — non-contiguous
+        self.assertFalse(x_npu.is_contiguous(), "x_npu should be non-contiguous")
+        weight_npu = _gpu_weight_to_npu(weight_gpu)
         conv_states_npu = _make_zero_conv_states(batch, width, dim, dtype=x_gpu.dtype)
 
-        # Expected output from GPU
-        y_expected_npu = _gpu_out_to_npu(case["y_expected"])  # (2047, 8192)
+        y_expected_npu = _gpu_out_to_npu(case["y_expected"])
 
-        # Move to NPU
         y = self.call_op(
             x=x_npu.npu(),
             weight=weight_npu.npu(),
@@ -188,26 +236,30 @@ class TestCausalConv1dGpuGolden(unittest.TestCase):
     # Case 2: prefill_incr_seq32
     #   Single sequence of 32 tokens, dim=8192, width=4, has paged conv_states.
     #   Since prefix_lengths=0, initial states are effectively zero.
+    #   x is non-contiguous (stride=(1, 12288)); conv_states is non-contiguous
+    #   (stride=(1048576, 1, 8192), channel-last on dim axis).
     # ------------------------------------------------------------------
     def test_prefill_incr_seq32(self):
         case = _load_gpu_case("prefill_incr_seq32.pt")
 
-        x_gpu = case["x"]           # (8192, 32) float16
-        weight_gpu = case["weight"] # (8192, 4)  float16
-        qsl = case["query_start_loc"].to(torch.int64)  # [0, 32]
+        x_gpu = case["x"]           # (8192, 32) — non-contiguous, stride=(1, 12288)
+        weight_gpu = case["weight"]
+        qsl = case["query_start_loc"].to(torch.int64)
+
+        # Verify x is restored as non-contiguous (channel-last on GPU)
+        self.assertFalse(x_gpu.is_contiguous(), "x should be non-contiguous after stride restoration")
+        self.assertEqual(x_gpu.stride(), (1, 12288), "x stride should match GPU input_meta")
 
         dim, width = weight_gpu.shape
         batch = int(qsl.shape[0] - 1)
 
-        # Convert to NPU format
-        x_npu = _gpu_x_to_npu_varlen(x_gpu)          # (S=32, D=8192)
-        weight_npu = _gpu_weight_to_npu(weight_gpu)   # (W=4, D=8192)
+        x_npu = x_gpu.T              # (32, 8192) — non-contiguous
+        self.assertFalse(x_npu.is_contiguous(), "x_npu should be non-contiguous")
+        weight_npu = _gpu_weight_to_npu(weight_gpu)
         conv_states_npu = _make_zero_conv_states(batch, width, dim, dtype=x_gpu.dtype)
 
-        # Expected output from GPU
-        y_expected_npu = _gpu_out_to_npu(case["y_expected"])  # (32, 8192)
+        y_expected_npu = _gpu_out_to_npu(case["y_expected"])
 
-        # Move to NPU
         y = self.call_op(
             x=x_npu.npu(),
             weight=weight_npu.npu(),
@@ -226,19 +278,27 @@ class TestCausalConv1dGpuGolden(unittest.TestCase):
     # Case 3: decode_update
     #   Single-sequence decode (update) with paged conv_state.
     #   x: (1, 8192, 1), weight: (8192, 4), activation: SiLU, no bias.
-    #   conv_state is paged (293, 8192, 3); the test extracts the
-    #   relevant page via block_map.
-    #   GPU golden captures both the output y and the in-place-updated
-    #   conv_state for full validation.
+    #   conv_state is paged (293, 8192, 3) non-contiguous
+    #   (stride=(1048576, 1, 8192), channel-last on dim axis).
+    #   The extracted page is transposed to NPU format (1, 3, 8192)
+    #   preserving the non-contiguous stride with dim-axis stride=1.
     # ------------------------------------------------------------------
     def test_decode_update(self):
         case = _load_gpu_update_case("decode.pt")
 
-        x_npu = case["x_npu"]                            # (1, 8192)
-        weight_npu = case["weight_npu"]                  # (4, 8192)
-        conv_states_npu = case["conv_states_npu"]        # (1, 3, 8192)
-        y_expected_npu = case["y_expected_npu"]          # (1, 8192)
-        conv_states_expected = case["conv_states_expected"]  # (1, 3, 8192)
+        x_npu = case["x_npu"]
+        weight_npu = case["weight_npu"]
+        conv_states_npu = case["conv_states_npu"]        # full paged, non-contiguous
+        page_idx = case["page_idx"]
+        y_expected_npu = case["y_expected_npu"]
+        conv_states_expected = case["conv_states_expected"]
+
+        # Verify conv_states is non-contiguous with dim-axis stride=1
+        # (matching GPU's channel-last layout for conv_state)
+        self.assertFalse(conv_states_npu.is_contiguous(),
+                         "conv_states should be non-contiguous after stride restoration")
+        self.assertEqual(conv_states_npu.stride(-1), 1,
+                         "conv_states dim axis (last) must have stride=1 for NPU DataCopy")
 
         conv_states_device = conv_states_npu.npu()
 
@@ -247,7 +307,7 @@ class TestCausalConv1dGpuGolden(unittest.TestCase):
             weight=weight_npu.npu(),
             bias=None,
             conv_states=conv_states_device,
-            cache_indices=[0],
+            cache_indices=[page_idx],
             activation_mode=case["activation_mode"],
             pad_slot_id=-1,
             run_mode=1,
@@ -255,7 +315,9 @@ class TestCausalConv1dGpuGolden(unittest.TestCase):
         )
 
         self.assertTensorClose(y, y_expected_npu)
-        self.assertTensorClose(conv_states_device.cpu(), conv_states_expected)
+        # Extract the updated page from the full paged tensor for comparison
+        conv_states_actual = conv_states_device.cpu()[page_idx].unsqueeze(0)
+        self.assertTensorClose(conv_states_actual, conv_states_expected)
 
 
 if __name__ == "__main__":
