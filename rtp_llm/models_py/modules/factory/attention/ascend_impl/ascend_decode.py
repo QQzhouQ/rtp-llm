@@ -107,25 +107,6 @@ class AscendDecodeImpl(FMHAImplBase):
         ctx_list = (seq_lens.to(torch.int32) + 1).tolist()
         self.fmha_impl.update_graph_fia(ctx_list, batch_size)
 
-    def prepare_cuda_graph(self, attn_inputs):
-        """Refresh attention operator state from the persistent attn_inputs buffer.
-
-        Called by AscendGraphRunner::prepareInputs() before each replay. The
-        attn_inputs here reference the persistent device/host tensors that
-        were captured into the ACL graph, so any in-place updates we make to
-        derived tensors (context_lens, etc.) are picked up at replay time.
-
-        We deliberately *re-bind* the derived tensors to the freshly-copied
-        attn_inputs so the next forward call reads the latest data; the
-        captured graph kernel reads the underlying persistent storage whose
-        address has not changed.
-        """
-        self.attn_inputs = attn_inputs
-        # block_table and context_lens are derived from the (now updated)
-        # persistent attn_inputs. The fmha_impl.forward() reads them lazily.
-        self.fmha_impl.prepare(attn_inputs)
-        # RoPE / KV-write slot_mapping depends on attn_inputs; recompute on next forward.
-
     def forward(self, qkv, kv_cache, layer_idx=0):
         is_graph = getattr(self.attn_inputs, "is_cuda_graph", False)
 
@@ -236,25 +217,16 @@ class AscendDecodeAttnOp:
         atten_mask = self._get_causal_mask(q.device)
 
         if AscendDecodeAttnOp._shared_workspace is None:
-            dummy_k = torch.empty(4, self.page_size, self.num_kv_heads * self.head_dim,
-                                  dtype=q.dtype, device=q.device)
-            dummy_v = torch.empty(4, self.page_size, self.num_kv_heads * self.head_dim,
-                                  dtype=q.dtype, device=q.device)
-            dummy_q = torch.empty(1, self.num_heads, self.head_dim,
-                                  dtype=q.dtype, device=q.device)
-            dummy_bt = torch.zeros(1, 1, dtype=torch.int32, device=q.device)
             AscendDecodeAttnOp._shared_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                query=dummy_q, key=dummy_k, value=dummy_v, atten_mask=atten_mask,
-                block_table=dummy_bt, input_layout="TND",
-                block_size=self.page_size,
-                actual_seq_qlen=[1], actual_seq_kvlen=[self.page_size],
+                query=q, key=k_cache, value=v_cache,
+                atten_mask=atten_mask, block_table=block_table,
+                input_layout="TND", block_size=self.page_size,
+                actual_seq_qlen=list(range(1, batch_size + 1)),
+                actual_seq_kvlen=[self.page_size] * batch_size,
                 num_key_value_heads=self.num_kv_heads,
                 num_query_heads=self.num_heads,
                 softmax_scale=self.scale, sparse_mode=3)
-            blocks = kv_cache.kv_cache_base.shape[0]
-            HD = self.num_kv_heads * self.head_dim
-            kv_contiguous_bytes = 2 * blocks * self.page_size * HD * q.element_size()
-            ws_bytes = AscendDecodeAttnOp._shared_workspace.numel() * AscendDecodeAttnOp._shared_workspace.element_size() + kv_contiguous_bytes + 1024 * 1024
+            ws_bytes = AscendDecodeAttnOp._shared_workspace.numel() * AscendDecodeAttnOp._shared_workspace.element_size()
             AscendDecodeAttnOp._shared_workspace = torch.empty(ws_bytes // q.element_size(),
                                                 dtype=q.dtype, device=q.device)
 
@@ -272,7 +244,7 @@ class AscendDecodeAttnOp:
             return attn_output
 
         actual_seq_q = list(range(1, batch_size + 1))
-        actual_seq_kv = [self.page_size]
+        actual_seq_kv = [self.page_size] * batch_size
         stream = torch.npu.current_stream()
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
