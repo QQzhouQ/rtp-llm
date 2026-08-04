@@ -103,24 +103,40 @@ def _load_gpu_case(filename: str) -> dict:
     # star_idx=0 means new tokens start at index 0 (no prefix in q/k/v).
     actual_seq_lengths = torch.tensor([0, 1], dtype=torch.int32)
 
-    # ssm_state_indices: maps each token to a state slot.
-    # Use index 0 since we extract only the needed page.
-    t = int(actual_seq_lengths.sum().item())
-    ssm_state_indices = torch.tensor([0] * t, dtype=torch.int32)
-
     # scale: GPU may store None; default is dk ** -0.5
     dk = q_npu.shape[-1]
     scale = inputs.get("scale")
     if scale is None:
         scale = float(dk ** -0.5)
 
-    # Extract the needed page and convert to bfloat16 for NPU.
-    # GPU state layout is (nv, dk, dv); NPU expects (nv, dv, dk), so transpose.
-    # The full paged state (293 pages) is ~461MB in float32, which can
-    # cause device memory issues. We extract only the active page.
-    # Non-contiguity is verified separately on the full restored tensor.
-    state_page = state_restored[page_idx].transpose(-1, -2).contiguous().to(torch.bfloat16)  # (32, 128, 128)
-    state_npu = state_page.unsqueeze(0)                       # (1, 32, 128, 128)
+    # Build a non-contiguous paged state tensor matching GPU's paged layout.
+    # GPU state layout is (num_pages, nv, dk, dv) with non-contiguous 0-dim
+    # (stride[0] = 2 * page_size). NPU expects (num_pages, nv, dv, dk) with
+    # dk innermost (stride 1). Since transpose(-1,-2) would make dk non-
+    # contiguous (stride != 1), we allocate a strided buffer with NPU inner
+    # layout and non-contiguous 0-dim, then copy page data with transpose.
+    #
+    # We use a small 3-page buffer (page 1 = active, pages 0/2 = padding)
+    # to keep memory usage low while still testing the non-contiguous
+    # 0-dim stride path that the kernel handles via stateStride0_.
+    num_pages_gpu, nv, dk, dv = state_restored.shape
+    test_num_pages = 3
+    test_page_idx = 1  # active page placed at index 1
+    page_elems = nv * dv * dk  # 32 * 128 * 128 = 524288
+    npu_stride = (2 * page_elems, dv * dk, dk, 1)  # 0-dim has 2x gap like GPU
+    state_npu = torch.empty_strided(
+        (test_num_pages, nv, dv, dk), npu_stride, dtype=torch.bfloat16
+    )
+    state_npu.fill_(0)
+    # Copy the active page with (dk, dv) → (dv, dk) transpose
+    state_npu[test_page_idx].copy_(
+        state_restored[page_idx].transpose(-1, -2).to(torch.bfloat16)
+    )
+
+    # ssm_state_indices: maps each token to a state slot.
+    # Points to test_page_idx (page 1) in the non-contiguous buffer.
+    t = int(actual_seq_lengths.sum().item())
+    ssm_state_indices = torch.tensor([test_page_idx] * t, dtype=torch.int32)
 
     # GPU outputs: list of [out, final_state]
     out_expected = data["outputs"][0]        # (1, 1, 32, 128) float16
@@ -135,7 +151,7 @@ def _load_gpu_case(filename: str) -> dict:
         "q": q_npu,
         "k": k_npu,
         "v": v_npu,
-        "state": state_npu,                   # (1, 32, 128, 128) bfloat16
+        "state": state_npu,                   # (3, 32, 128, 128) bfloat16, non-contiguous 0-dim
         "state_restored": state_restored,     # full paged, non-contiguous (for verification)
         "beta": beta_npu,
         "g": g_npu,
@@ -143,6 +159,7 @@ def _load_gpu_case(filename: str) -> dict:
         "actual_seq_lengths": actual_seq_lengths,
         "ssm_state_indices": ssm_state_indices,
         "page_idx": page_idx,
+        "test_page_idx": test_page_idx,
         "out_expected": out_expected_npu,
         "state_expected": state_expected,
     }
@@ -174,20 +191,27 @@ class TestRecurrentGatedDeltaRuleGpuGolden(unittest.TestCase):
     #   q/k/v: (1, 1, n, d) float16 → NPU (1, n, d) bfloat16
     #   initial_state: (293, 32, 128, 128) bfloat16, non-contiguous
     #   (stride=(1048576, 16384, 128, 1), channel-last on dim axis).
-    #   Non-contiguity is verified on the full restored paged tensor.
-    #   Only the active page is passed to NPU to avoid ~461MB device memory.
+    #   A 3-page non-contiguous buffer is passed to NPU (page 1 = active)
+    #   to verify the kernel's stateStride0_ paged addressing path.
     # ------------------------------------------------------------------
     def test_decode(self):
         case = _load_gpu_case("decode.pt")
 
-        # Verify state was restored as non-contiguous (matching GPU's paged layout)
+        # Verify GPU state was restored as non-contiguous
         self.assertFalse(case["state_restored"].is_contiguous(),
-                         "state should be non-contiguous after stride restoration")
+                         "GPU state should be non-contiguous after stride restoration")
+
+        # Verify the NPU state tensor is also non-contiguous on 0-dim
+        state_npu = case["state"]
+        self.assertFalse(state_npu.is_contiguous(),
+                         "NPU state should be non-contiguous (paged layout)")
+        self.assertNotEqual(state_npu.stride(0), state_npu.shape[1] * state_npu.stride(1),
+                            "state stride[0] should have gap (non-contiguous 0-dim)")
 
         # Move inputs to NPU; state is mutated in-place so keep device reference
-        state_device = case["state"].npu()
+        state_device = state_npu.npu()
 
-        # Call NPU operator (matching test_accuracy.py calling convention)
+        # Call NPU operator
         out, _ = self.call_op(
             case["q"].npu(),
             case["k"].npu(),
@@ -204,8 +228,10 @@ class TestRecurrentGatedDeltaRuleGpuGolden(unittest.TestCase):
 
         # Compare the updated state page.
         # NPU state is (nv, dv, dk); GPU expected is (nv, dk, dv), so transpose back.
+        # Extract the active page (test_page_idx) from the non-contiguous buffer.
+        test_page_idx = case["test_page_idx"]
         page_idx = case["page_idx"]
-        state_actual = state_device.cpu()[0].transpose(-1, -2)  # (nv, dk, dv)
+        state_actual = state_device.cpu()[test_page_idx].transpose(-1, -2)  # (nv, dk, dv)
         state_expected_page = case["state_expected"][page_idx].to(torch.float32)
         self.assertTensorClose(state_actual, state_expected_page)
 
