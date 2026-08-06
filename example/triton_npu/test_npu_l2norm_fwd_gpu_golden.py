@@ -9,69 +9,42 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Test fused_gdn_gating NPU operator against GPU-collected golden data.
+Test l2norm_fwd NPU operator against GPU-collected golden data.
 
 Loads .pt files dumped from GPU runs and compares NPU execution results
 against the GPU reference output.
 
 Layout note
 -----------
-The GPU dump stores the gate inputs in token-major layout:
-  A_log  : (H,)       float16 — per-head log-space gate coefficient
-  a      : (S, H)     float16 — softplus input (non-contiguous in the dump,
-                                stride (64, 1): each row lives in a wider
-                                cache buffer and only the first H entries
-                                are used)
-  b      : (S, H)     float16 — sigmoid input (same stride semantics as a)
-  dt_bias: (H,)       float16 — per-head bias added to a
+The GPU dump stores the input in ``(B, T, H, D)`` token-major layout:
+  x: (B, T, H, D)  float16 — the tensor to be L2-normalized along the last dim
 
-The GPU kernel emits two outputs (with a leading singleton batch dim):
-  g    : (1, S, H)    float32 — -exp(A_log) * softplus(a + dt_bias)
-  beta : (1, S, H)    float16 — sigmoid(b)
+The kernel normalizes each row (flattened ``B*T*H`` rows of length ``D``) to
+unit L2 norm:
+  y = x / sqrt(sum(x * x, dim=-1) + eps)
 
-The operator is the rtp-llm Triton kernel ``fused_gdn_gating`` in
-``rtp_llm/models_py/triton_kernels/fla/gdn_gating.py``. ``rtp_llm``'s package
-``__init__`` tries to load a compiled ``.so`` that is absent in a source tree,
-so the module is loaded directly with ``importlib`` to keep the test standalone.
-The kernel runs on NPU via triton-ascend and matches the vllm-ascend
-``fused_gdn_gating_patch`` bit-for-bit (verified diff = 0).
+The operator implementation lives in flash-linear-attention-npu as a Triton
+kernel ``fla/ops/triton/triton_core/l2norm.py`` (``l2norm_fwd``), which returns
+``(y, rstd)``. The golden dump stores only ``y``, so the test compares ``y``
+against the golden output and also validates the unit-norm property.
 """
 
-import importlib.util
 import os
 import unittest
 
 import torch
 
-
-def _load_rtp_fused_gdn_gating():
-    """Load rtp-llm's ``fused_gdn_gating`` without importing the ``rtp_llm`` package.
-
-    ``rtp_llm.__init__`` requires a compiled ``libth_transformer_config.so`` that
-    is not present in a source checkout, so we load ``gdn_gating.py`` directly.
-    """
-    path = os.path.join(
-        os.path.dirname(__file__),
-        "..", "..", "..",
-        "rtp-llm", "rtp_llm", "models_py", "triton_kernels", "fla", "gdn_gating.py",
-    )
-    spec = importlib.util.spec_from_file_location("_rtp_gdn_gating", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.fused_gdn_gating
-
-
-_fused_gdn_gating = _load_rtp_fused_gdn_gating()
-
-torch.npu.set_device(int(os.environ.get("TEST_DEVICE_ID", 0)))
+from fla.ops.triton.triton_core.l2norm import l2norm_fwd
 
 # Path to the GPU-dumped golden data. The data lives outside the repo tree under
-# <workspace>/sample/fused_gdn_gating; allow an env override for CI / container
+# <workspace>/sample/l2norm_fwd; allow an env override for CI / container
 # environments where the layout differs.
 _DEFAULT_DATA_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "sample", "fused_gdn_gating"
+    os.path.dirname(__file__), "..", "..", "..", "sample", "l2norm_fwd"
 )
-_DATA_DIR = os.path.abspath(os.environ.get("FUSED_GDN_GATING_GOLDEN_DIR", _DEFAULT_DATA_DIR))
+_DATA_DIR = os.path.abspath(os.environ.get("L2NORM_FWD_GOLDEN_DIR", _DEFAULT_DATA_DIR))
+
+torch.npu.set_device(int(os.environ.get("TEST_DEVICE_ID", 0)))
 
 
 def _restore_strided_tensor(saved_data: torch.Tensor, meta: dict) -> torch.Tensor:
@@ -93,46 +66,33 @@ def _restore_strided_tensor(saved_data: torch.Tensor, meta: dict) -> torch.Tenso
 
 
 def _load_gpu_case(filename: str) -> dict:
-    """Load a .pt file containing GPU golden inputs/outputs.
-
-    Restores the original (possibly non-contiguous) strides of ``a``/``b``
-    from ``input_meta``: in the dump they are views with a row stride wider
-    than H (e.g. (64, 1) for H=32).
-    """
+    """Load a .pt file containing GPU golden inputs/outputs."""
     path = os.path.join(_DATA_DIR, filename)
     data = torch.load(path, map_location="cpu", weights_only=False)
 
     inputs = data["inputs"]
     meta = data.get("input_meta", {})
 
-    A_log = _restore_strided_tensor(inputs["A_log"], meta.get("A_log", {}))
-    a = _restore_strided_tensor(inputs["a"], meta.get("a", {}))
-    b = _restore_strided_tensor(inputs["b"], meta.get("b", {}))
-    dt_bias = _restore_strided_tensor(inputs["dt_bias"], meta.get("dt_bias", {}))
+    x = _restore_strided_tensor(inputs["x"], meta.get("x", {}))
 
-    # GPU outputs: g (float32) then beta (float16), both (1, S, H).
-    g_expected = data["outputs"][0]
-    beta_expected = data["outputs"][1]
+    # GPU output: y (same shape as x), float16.
+    y_expected = data["outputs"]
 
     return {
-        "A_log": A_log,
-        "a": a,
-        "b": b,
-        "dt_bias": dt_bias,
-        "g_expected": g_expected,
-        "beta_expected": beta_expected,
+        "x": x,
+        "y_expected": y_expected,
     }
 
 
 @unittest.skipIf(not torch.npu.is_available(), "NPU is not available")
-class TestFusedGdnGatingGpuGolden(unittest.TestCase):
-    """Compare rtp-llm fused_gdn_gating (Triton) output against GPU golden data."""
+class TestL2NormFwdGpuGolden(unittest.TestCase):
+    """Compare flash-linear-attention-npu l2norm_fwd (Triton) output against GPU golden data."""
 
     rtol = 5e-2
     atol = 5e-2
 
-    def call_op(self, **kwargs):
-        return _fused_gdn_gating(**kwargs)
+    def call_op(self, x, eps=1e-6):
+        return l2norm_fwd(x, eps=eps)
 
     def assertTensorClose(self, actual: torch.Tensor, expected: torch.Tensor, *, rtol=None, atol=None):
         rtol = self.rtol if rtol is None else rtol
@@ -149,48 +109,41 @@ class TestFusedGdnGatingGpuGolden(unittest.TestCase):
         case = _load_gpu_case(filename)
 
         # Sanity-check the loaded golden tensors before execution.
-        self.assertEqual(tuple(case["g_expected"].shape), (1,) + tuple(case["a"].shape))
-        self.assertEqual(tuple(case["beta_expected"].shape), (1,) + tuple(case["b"].shape))
-        self.assertEqual(case["g_expected"].dtype, torch.float32)
-        self.assertEqual(case["beta_expected"].dtype, torch.float16)
+        self.assertEqual(tuple(case["y_expected"].shape), tuple(case["x"].shape))
+        self.assertEqual(case["y_expected"].dtype, torch.float16)
 
-        # The rtp-llm kernel supports non-contiguous a/b via ``stride_ab``, so the
-        # restored views can be passed directly (no contiguous() needed).
-        g, beta = self.call_op(
-            A_log=case["A_log"].npu(),
-            a=case["a"].npu(),
-            b=case["b"].npu(),
-            dt_bias=case["dt_bias"].npu(),
+        # The kernel normalizes the flattened (B*T*H, D) rows along the last dim.
+        y, rstd = self.call_op(
+            case["x"].npu(),
+            eps=1e-6,
         )
         torch.npu.synchronize()
 
-        # Compare NPU Triton results against the GPU golden output.
-        self.assertEqual(tuple(g.shape), tuple(case["g_expected"].shape))
-        self.assertEqual(tuple(beta.shape), tuple(case["beta_expected"].shape))
-        self.assertTensorClose(g, case["g_expected"])
-        self.assertTensorClose(beta, case["beta_expected"])
+        # Compare the normalized output against the GPU golden output.
+        self.assertEqual(tuple(y.shape), tuple(case["y_expected"].shape))
+        self.assertTensorClose(y, case["y_expected"])
+
+        # Validate the unit-L2-norm property of the normalized rows.
+        y_flat = y.detach().cpu().float().reshape(-1, y.shape[-1])
+        norms = y_flat.norm(dim=-1)
+        self.assertTrue(
+            torch.allclose(norms, torch.ones_like(norms), rtol=1e-2, atol=1e-2),
+            msg=f"L2 norm not close to 1: min={norms.min().item():.6f} max={norms.max().item():.6f}",
+        )
 
     # ------------------------------------------------------------------
-    # Case 1: decode_seq1
-    #   Single decode token (S=1), H=32. a/b are stride (64, 1) but dim0=1 so
-    #   torch considers them contiguous.
+    # Case 1: prefill_T256
+    #   x: (1, 16, 16, 128) float16 — D=128 rows.
     # ------------------------------------------------------------------
-    def test_decode_seq1(self):
-        self._run_case("decode_seq1.pt")
+    def test_prefill_T256(self):
+        self._run_case("prefill_T256.pt")
 
     # ------------------------------------------------------------------
-    # Case 2: prefill_seq32
-    #   32 prefill tokens, H=32. a/b are non-contiguous (stride (64, 1)).
+    # Case 2: prefill_T32752
+    #   x: (1, 2047, 16, 128) float16 — larger token count.
     # ------------------------------------------------------------------
-    def test_prefill_seq32(self):
-        self._run_case("prefill_seq32.pt")
-
-    # ------------------------------------------------------------------
-    # Case 3: prefill_seq2047
-    #   2047 prefill tokens, H=32. a/b are non-contiguous (stride (64, 1)).
-    # ------------------------------------------------------------------
-    def test_prefill_seq2047(self):
-        self._run_case("prefill_seq2047.pt")
+    def test_prefill_T32752(self):
+        self._run_case("prefill_T32752.pt")
 
 
 if __name__ == "__main__":
