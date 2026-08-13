@@ -8,10 +8,20 @@
 #include <string>
 #include <thread>
 #include "torch/csrc/autograd/profiler_kineto.h"
+#if USING_ASCEND
+#include <memory>
+#endif
 
 namespace rtp_llm {
 
 namespace tpi = torch::profiler::impl;
+
+#if USING_ASCEND
+// Opaque handle to the Ascend torch_npu profiler (defined in TorchProfiler.cc
+// under USING_ASCEND). Only present on Ascend builds — non-Ascend builds keep
+// the struct layout unchanged.
+struct AscendProfilerImpl;
+#endif
 
 // Low-level profiler wrapper around Kineto.
 // IMPORTANT: start() and stop() MUST be called on the same thread (Kineto thread-affinity).
@@ -38,6 +48,11 @@ private:
     tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
     std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
     bool                        stopped_ = true;
+
+#if USING_ASCEND
+    // Non-null while an Ascend torch_npu profiling window is active.
+    std::unique_ptr<AscendProfilerImpl> ascend_impl_;
+#endif
 };
 
 // Background thread that serializes profiler results to disk without blocking the engine loop.
