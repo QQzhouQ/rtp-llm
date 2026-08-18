@@ -37,5 +37,5 @@ class AscendKVCacheWriteOp:
             slot_mapping = slot_mapping.to(torch.int32)
 
         torch_npu.npu_scatter_pa_kv_cache(
-            key, value, k_view, v_view, slot_mapping,
+            key, value, k_view, v_view, slot_mapping, cache_mode = "Norm"
         )

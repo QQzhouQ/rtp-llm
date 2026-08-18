@@ -5,6 +5,7 @@ load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="require
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@pip_ascend_torch//:requirements.bzl", requirement_ascend="requirement")
+load("@pip_ascend_arm_torch//:requirements.bzl", requirement_ascend_arm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -34,6 +35,7 @@ def requirement(names):
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                     "@rtp_llm//:using_arm": [requirement_arm(name)],
+                    "@rtp_llm//:using_ascend_arm": [],
                     "@rtp_llm//:using_ascend": [],
                     "//conditions:default": [requirement_cpu(name)],
                 }),
@@ -47,6 +49,7 @@ def requirement(names):
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                     "@rtp_llm//:using_arm": [requirement_arm(name)],
+                    "@rtp_llm//:using_ascend_arm": [requirement_ascend_arm(name)],
                     "@rtp_llm//:using_ascend": [requirement_ascend(name)],
                     "//conditions:default": [requirement_cpu(name)],
                 }),
@@ -87,6 +90,7 @@ def whl_deps():
     return select({
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
+        "@rtp_llm//:using_ascend_arm": ["torch==2.9.0+cpu", "torch_npu==2.9.0"],
         "@rtp_llm//:using_ascend": ["torch==2.9.0+cpu", "torch_npu==2.9.0"],
         "//conditions:default": ["torch==2.1.2"],
     })
@@ -121,6 +125,12 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
+        ],
+        "@rtp_llm//:using_ascend_arm": [
+            "@torch_cpu_ascend_arm//:torch_api",
+            "@torch_cpu_ascend_arm//:torch",
+            "@torch_cpu_ascend_arm//:torch_libs",
+            "@torch_npu_ascend_arm//:torch_npu",
         ],
         "@rtp_llm//:using_ascend": [
             "@torch_cpu_ascend//:torch_api",

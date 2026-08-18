@@ -13,10 +13,13 @@ def git_deps():
         commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
     )
 
-    git_repository(
+    http_archive(
         name = "rules_python",
-        remote = "https://github.com/bazelbuild/rules_python.git",
-        commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
+        urls = [
+            "https://github.com/bazelbuild/rules_python/archive/084b877c98b580839ceab2b071b02fc6768f3de6.tar.gz",
+        ],
+        strip_prefix = "rules_python-084b877c98b580839ceab2b071b02fc6768f3de6",
+        sha256 = "3d6fe72f1a056b3462f02afba5049210acbaec131087fb19082fa6792198a9fa",
         patches = [
             "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
             "@rtp_llm//patches/rules_python:0002-remove-import-from-rules_cc.patch",

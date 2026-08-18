@@ -43,7 +43,13 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
-    ],
+    ] + select({
+        # Ascend torch_npu profiling (pybind11) — only on Ascend; non-Ascend
+        # builds keep the original deps unchanged. USING_ASCEND itself comes
+        # from the global --config=ascend copt in .bazelrc.
+        "@//:using_ascend": ["//rtp_llm/cpp/pybind:py_utils"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
