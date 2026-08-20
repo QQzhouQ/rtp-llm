@@ -5,6 +5,7 @@
 #    bazel run //:requirements_ascend.update
 #
 --extra-index-url https://mirrors.aliyun.com/pypi/simple/
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 aiohappyeyeballs==2.6.1
     # via aiohttp
@@ -335,6 +336,10 @@ timm==0.9.12
     # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_base.txt
 tokenizers==0.21.4
     # via transformers
+triton==3.2.0
+    # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_ascend.txt
+triton-ascend==3.2.2
+    # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_ascend.txt
 torch @ https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl
     # via
     #   -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_ascend.txt
