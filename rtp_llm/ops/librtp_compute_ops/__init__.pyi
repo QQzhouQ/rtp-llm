@@ -152,6 +152,22 @@ class LayerKVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
     @property
+    def k_cache_base(self) -> torch.Tensor:
+        """
+        K cache tensor (separate, NHD layout)
+        """
+
+    @k_cache_base.setter
+    def k_cache_base(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def v_cache_base(self) -> torch.Tensor:
+        """
+        V cache tensor (separate, NHD layout)
+        """
+
+    @v_cache_base.setter
+    def v_cache_base(self, arg0: torch.Tensor) -> None: ...
+    @property
     def layer_id(self) -> int:
         """
         Global layer id

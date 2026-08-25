@@ -6,7 +6,9 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-#if USING_ROCM
+#if USING_ASCEND
+#define GRAPH_DEVICE_TYPE torch::kPrivateUse1
+#elif USING_ROCM
 #include <ATen/hip/HIPGraph.h>
 #include <ATen/hip/HIPContext.h>
 #include <c10/hip/HIPGuard.h>
@@ -50,7 +52,9 @@ using GraphPoolHandle = c10::cuda::MempoolId_t;
 struct GraphPoolHandle {};
 #endif
 
-#if USING_ROCM
+#if USING_ASCEND
+using GraphStream = void*;
+#elif USING_ROCM
 using GraphStream      = at::hip::HIPStream;
 using GraphStreamGuard = at::hip::HIPStreamGuard;
 #else
@@ -86,7 +90,9 @@ inline void* getGraphCaptureTpNcclComm() {
 }
 
 inline GraphStream graphGetStreamFromPool(bool is_high_priority) {
-#if USING_ROCM
+#if USING_ASCEND
+    return nullptr;
+#elif USING_ROCM
     return at::hip::getStreamFromPool(is_high_priority);
 #else
     return at::cuda::getStreamFromPool(is_high_priority);
@@ -94,7 +100,9 @@ inline GraphStream graphGetStreamFromPool(bool is_high_priority) {
 }
 
 inline GraphStream graphGetCurrentStream() {
-#if USING_ROCM
+#if USING_ASCEND
+    return nullptr;
+#elif USING_ROCM
     return at::hip::getCurrentHIPStream(at::hip::current_device());
 #else
     return at::cuda::getCurrentCUDAStream(at::cuda::current_device());
@@ -102,7 +110,9 @@ inline GraphStream graphGetCurrentStream() {
 }
 
 inline void graphSetCurrentStream(GraphStream stream) {
-#if USING_ROCM
+#if USING_ASCEND
+    (void)stream;
+#elif USING_ROCM
     at::hip::setCurrentHIPStream(stream);
 #else
     at::cuda::setCurrentCUDAStream(stream);
@@ -110,7 +120,11 @@ inline void graphSetCurrentStream(GraphStream stream) {
 }
 
 inline torch::Event makeGraphEvent() {
+#if USING_ASCEND
+    return torch::Event(torch::kPrivateUse1);
+#else
     return torch::Event(GRAPH_DEVICE_TYPE);
+#endif
 }
 
 #if USING_ROCM

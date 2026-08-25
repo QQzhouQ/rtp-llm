@@ -227,10 +227,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor storage size overflow");
         auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
+#if USING_ASCEND
+            options = options.device(torch::kPrivateUse1);
+#else
             options = options.device(torch::kCUDA);
+#endif
         }
         auto tensor = torch::empty(dims, options);
         // NCCL broadcast requires pinned memory for CPU buffers
+        // TODO: Ascend - check if this is still true for ascend
         if (atype != rtp_llm::AllocationType::DEVICE) {
             tensor = tensor.pin_memory();
         }
@@ -412,7 +417,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor byte size exceeds int64");
         const auto nb      = static_cast<int64_t>(raw_nbytes);
         const auto aligned = align_up(nb, kPackAlignment);
-        if (tp->is_cuda()) {
+        if (tp->is_cuda() || tp->is_privateuse1()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
             RTP_LLM_CHECK_WITH_INFO(gpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
                                     "tpSyncModelInputs GPU packed-buffer size overflow");
@@ -443,7 +448,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     if (gpu_total_bytes > 0) {
-        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8)
+#if USING_ASCEND
+                                 .device(torch::kPrivateUse1));
+#else
+                                 .device(torch::kCUDA));
+#endif
         if (is_root) {
             auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
             FusedD2DCopyParams fused_params;

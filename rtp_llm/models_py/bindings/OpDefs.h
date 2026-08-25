@@ -279,6 +279,7 @@ struct PyContextParallelParams {
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
 // counterpart carries a _device suffix.
 struct PyAttentionInputs {
+    std::optional<KVCache> kv_cache;
     bool          is_prefill{false};
     bool          is_target_verify{false};
     torch::Tensor prefix_lengths;

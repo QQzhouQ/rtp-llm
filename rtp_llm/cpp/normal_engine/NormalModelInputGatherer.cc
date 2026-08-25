@@ -177,9 +177,13 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         // features with non-negative local locations only.
         const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
         auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
-        if (!current_feature.is_cuda()) {
+        if (!current_feature.is_cuda() && !current_feature.is_privateuseone()) {
             host_holder.hold_host(current_feature);
+#if USING_ASCEND
+            gathered_mm_features.emplace_back(current_feature.to(torch::kPrivateUse1, /*non_blocking=*/true));
+#else
             gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+#endif
         } else {
             gathered_mm_features.emplace_back(std::move(current_feature));
         }
@@ -199,6 +203,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
         }
+#endif
     }
     auto text_token_mask = stream->textTokensMask();
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));

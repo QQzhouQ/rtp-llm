@@ -125,7 +125,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
 
     auto target_token_ids_d_t = target_sampler_output.token_ids;
-    if (!target_token_ids_d_t.is_cuda()) {
+    if (!target_token_ids_d_t.is_cuda() && !target_token_ids_d_t.is_privateuseone()) {
         buffer_holder_.hold_host(target_token_ids_d_t);
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
