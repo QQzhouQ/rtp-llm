@@ -860,7 +860,7 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 // Pybind registration
 // ============================================================
 
-void registerExecCtxOps(pybind11::module& m) {
+__attribute__((visibility("default"))) void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,

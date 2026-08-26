@@ -54,6 +54,9 @@ struct GraphPoolHandle {};
 
 #if USING_ASCEND
 using GraphStream = void*;
+struct GraphStreamGuard {
+    explicit GraphStreamGuard(GraphStream) {}
+};
 #elif USING_ROCM
 using GraphStream      = at::hip::HIPStream;
 using GraphStreamGuard = at::hip::HIPStreamGuard;
@@ -63,7 +66,10 @@ using GraphStreamGuard = at::cuda::CUDAStreamGuard;
 #endif
 
 inline GraphStream toGraphStream(const torch::Stream& stream) {
-#if USING_ROCM
+#if USING_ASCEND
+    (void)stream;
+    return nullptr;
+#elif USING_ROCM
     return at::hip::HIPStream(stream);
 #else
     return at::cuda::CUDAStream(stream);
@@ -71,7 +77,9 @@ inline GraphStream toGraphStream(const torch::Stream& stream) {
 }
 
 inline void setDevice(int rank) {
-#if USING_ROCM
+#if USING_ASCEND
+    (void)rank;
+#elif USING_ROCM
     auto result = hipSetDevice(rank);
     RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "hipSetDevice(%d) failed: %s", rank, hipGetErrorString(result));
     at::hip::set_device(rank);
@@ -127,6 +135,26 @@ inline torch::Event makeGraphEvent() {
 #endif
 }
 
+// Event/stream ordering helpers. Ascend's GraphStream is an opaque handle, so
+// cross-stream record/block pairs degrade to stream-synchronous semantics.
+inline void graphRecordEvent(torch::Event& event, GraphStream stream) {
+#if USING_ASCEND
+    (void)event;
+    (void)stream;
+#else
+    event.record(stream);
+#endif
+}
+
+inline void graphBlockEvent(const torch::Event& event, GraphStream stream) {
+#if USING_ASCEND
+    (void)event;
+    (void)stream;
+#else
+    event.block(stream);
+#endif
+}
+
 #if USING_ROCM
 py::module_& getCollectiveTorchModule();
 #endif
@@ -141,7 +169,11 @@ void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
 size_t          graphReservedBytes();
 size_t          graphAllocatedBytes();
 GraphPoolHandle graphPoolHandle();
+#if USING_CUDA || USING_ROCM
 void            graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool);
+#else
+void            graphCaptureBegin(void* graph, GraphPoolHandle pool);
+#endif
 
 }  // namespace cuda_graph
 }  // namespace rtp_llm

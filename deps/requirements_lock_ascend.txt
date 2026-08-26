@@ -136,6 +136,16 @@ jinja2==3.1.6
 jiter==0.14.0
     # via openai
 jmespath==0.10.0
+jsonschema==4.26.0
+    # via -r requirements_base.txt
+jsonschema-specifications==2025.9.1
+    # via jsonschema
+referencing==0.37.0
+    # via jsonschema
+    # via jsonschema-specifications
+rpds-py==0.30.0
+    # via jsonschema
+    # via referencing
     # via aliyun-python-sdk-core
 joblib==1.5.3
     # via
@@ -380,6 +390,8 @@ urllib3==2.7.0
     #   blobfile
     #   requests
 uvicorn==0.30.0
+watchdog==6.0.0
+    # via -r requirements_base.txt
     # via -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_base.txt
 wcwidth==0.7.0
     # via prettytable
@@ -395,3 +407,6 @@ setuptools==60.5.0
     # via
     #   -r /root/.cache/bazel/_bazel_root/50832219d92abd54ef9ef74e0f443e2a/external/rtp_deps/requirements_base.txt
     #   grpcio-tools
+
+zstandard==0.25.0
+    # via -r requirements_base.txt

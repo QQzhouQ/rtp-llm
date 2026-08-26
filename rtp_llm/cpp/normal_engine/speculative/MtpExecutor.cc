@@ -188,7 +188,7 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
                             "spec logits cap requires CUDA accept_len");
 
     if (verify_result.ready_event) {
-        verify_result.ready_event->block(cuda_graph::graphGetCurrentStream());
+        cuda_graph::graphBlockEvent(*verify_result.ready_event, cuda_graph::graphGetCurrentStream());
     }
     recordSpecTensorUseOnCurrentStream(cap_src);
     auto cap_gpu      = cap_src.to(output.accept_len.options());
@@ -222,12 +222,12 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
-    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*output.transfer_done_event, cuda_graph::graphGetCurrentStream());
     // The spec artifact is read by logits masking before sampling and by cap
     // application here. Recording after cap keeps future artifact pools from
     // reusing mask/cap storage before the sampler stream has consumed both.
     if (verify_result.consumed_event) {
-        verify_result.consumed_event->record(cuda_graph::graphGetCurrentStream());
+        cuda_graph::graphRecordEvent(*verify_result.consumed_event, cuda_graph::graphGetCurrentStream());
     }
 }
 
@@ -564,12 +564,22 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
+#if USING_ASCEND
+    // Ascend async runners execute on a worker thread over the default NPU stream.
+    collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
+    target_verify_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
+    draft_prefill_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
+    spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
+    spec_logits_verify_async_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
+    spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))) {
+#else
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+#endif
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
@@ -1310,14 +1320,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*draft_tokens_ready_event, cuda_graph::graphGetCurrentStream());
 
     auto launch_spec_logits_verify_async = [&](torch::Tensor                 draft_tokens,
                                                std::shared_ptr<torch::Event> tokens_ready_event) {
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            #if !USING_ASCEND
             spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
@@ -1397,14 +1409,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            #if !USING_ASCEND
             spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
         if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
             draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-            draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphRecordEvent(*draft_tokens_ready_event, cuda_graph::graphGetCurrentStream());
         }
         *spec_logits_result =
             buildSpecLogitsVerifyInline(streams, draft_sampler_output.token_ids, std::move(draft_tokens_ready_event));
@@ -1412,7 +1426,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
-        spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+    #if !USING_ASCEND
+    spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
     }
     if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
@@ -1443,7 +1459,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
-                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            #if !USING_ASCEND
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
                 // Rebuild after waiting so cached maxSeqLen/batch sizes reflect
                 // the host stream state that sampler input is about to read.
                 stream_groups = StreamGroups(streams);
@@ -1475,7 +1493,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
         }
         if (metrics_reporter_) {
-            accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphRecordEvent(accept_len_ready_event, cuda_graph::graphGetCurrentStream());
         }
     } else {
         if (is_dspark_) {
@@ -1495,13 +1513,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // accept_len/accept_tokens, not the queue tail.
     if (useStreamAsync()) {
         rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        rejection_event->record(cuda_graph::graphGetCurrentStream());
+        cuda_graph::graphRecordEvent(*rejection_event, cuda_graph::graphGetCurrentStream());
     }
 
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
+    #if !USING_ASCEND
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1537,7 +1557,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // on the earliest valid point, not metrics or dispatch slicing.
     if (useStreamAsync()) {
         draft_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        draft_event->record(cuda_graph::graphGetCurrentStream());
+        cuda_graph::graphRecordEvent(*draft_event, cuda_graph::graphGetCurrentStream());
     }
 
     if (metrics_reporter_) {
@@ -1560,7 +1580,9 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
                                       streams.size());
+        #if !USING_ASCEND
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        #endif
     }
 
     // Linear attention may rewrite KV mappings via swapLinearBlocks; wait on
@@ -1572,7 +1594,7 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
             auto event_handle = stream->getPendingSwapDoneEvent();
             if (event_handle) {
                 auto event = std::static_pointer_cast<torch::Event>(event_handle);
-                event->block(cuda_graph::graphGetCurrentStream());
+                cuda_graph::graphBlockEvent(*event, cuda_graph::graphGetCurrentStream());
                 stream->clearPendingSwapDoneEvent();
             }
         }
@@ -1651,13 +1673,13 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     // Device-first inputs are produced on the main stream; the async prepare
     // stream must wait before it materializes CPU mirrors.
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    input_ready_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*input_ready_event, cuda_graph::graphGetCurrentStream());
     target_verify_prepare_runner_.launch(
         [this, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_attention_inputs)");
             {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_wait_input)");
-                input_ready_event->block(cuda_graph::graphGetCurrentStream());
+                cuda_graph::graphBlockEvent(*input_ready_event, cuda_graph::graphGetCurrentStream());
             }
             checkModelInputsOnCuda(model_input_copy, "decode.target_prepare.forwarded");
             {
@@ -1680,11 +1702,11 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    input_ready_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*input_ready_event, cuda_graph::graphGetCurrentStream());
     draft_prefill_prepare_runner_.launch(
         [this, draft_prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
-            input_ready_event->block(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphBlockEvent(*input_ready_event, cuda_graph::graphGetCurrentStream());
             checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
             draft_prefill_model->prepareAttentionInputs(model_input_copy);
         });
@@ -1699,14 +1721,18 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         model_input.input_lengths.size(0),
         model_input.prefix_lengths.size(0),
         model_input.sequence_lengths.size(0));
+    #if !USING_ASCEND
     target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+#endif
 
     // Linear-attention only: page table advances every token. Standard paged
     // attention (MHA/MLA) page table rarely changes within a propose+verify
     // cycle, so the re-gather is skipped there.
     if (is_linear_attention_model_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_kv_cache_kernel_block_id)");
+        #if !USING_ASCEND
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        #endif
 
         if (tp_rank_ == 0) {
             model_input.kv_cache_kernel_block_id =
@@ -2655,10 +2681,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         });
 
         if (rejection_event) {
-            rejection_event->block(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphBlockEvent(*rejection_event, cuda_graph::graphGetCurrentStream());
         }
         if (draft_event) {
-            draft_event->block(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphBlockEvent(*draft_event, cuda_graph::graphGetCurrentStream());
         }
 
         auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
@@ -2668,7 +2694,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
         for (auto& stream : worker_streams) {
             auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-            event->record(cuda_graph::graphGetCurrentStream());
+            cuda_graph::graphRecordEvent(*event, cuda_graph::graphGetCurrentStream());
             stream->setPendingSwapDoneEvent(std::static_pointer_cast<void>(event));
         }
     });

@@ -198,8 +198,15 @@ private:
                                     expected_numel,
                                     layer_id,
                                     group.tag.c_str());
+#if USING_ASCEND
+            // Ascend FIA/scatter ops expect BSND per-block layout:
+            // [blocks, 2, kernel_seq_size, local_kv_heads, head_dim].
+            result.kv_cache_base =
+                buffers.kv_addr.view({kernel_block_num, 2, kernel_seq_size, local_kv_heads, head_dim});
+#else
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+#endif
             if (buffers.kv_scale_addr.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
                                             && buffers.kv_scale_addr.size(0) == physical_block_num
@@ -239,7 +246,7 @@ private:
         return result;
     }
 
-    const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    rtp_llm::GroupedCacheLayerLayout grouped_layout_;
 };
 
 struct PyModelInitResources {
@@ -289,10 +296,12 @@ struct PyAttentionInputs {
     // Shape: [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id;
     torch::Tensor kv_cache_kernel_block_id_device;
+    torch::Tensor kv_cache_kernel_block_id_host;
     // Group-local physical block IDs dedicated for cache store.
     // Shape: [batch, max_blocks].
     torch::Tensor    kv_cache_block_id;
     torch::Tensor    kv_cache_block_id_device;
+    torch::Tensor    kv_cache_block_id_host;
     caffe2::TypeMeta dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror

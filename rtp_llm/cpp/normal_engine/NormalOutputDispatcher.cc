@@ -22,14 +22,19 @@ bool asyncDebugEnabled() {
 }
 
 torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {
-    if (!tensor.defined() || !tensor.is_cuda()) {
+    if (!tensor.defined() || (!tensor.is_cuda() && !tensor.is_privateuseone())) {
         return tensor;
     }
 
     auto cpu_tensor = torch::empty(
         tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
+#if USING_ASCEND
+    // No explicit stream handle to synchronize on Ascend; do a blocking D2H.
+    cpu_tensor.copy_(tensor, /*non_blocking=*/false);
+#else
     cpu_tensor.copy_(tensor, /*non_blocking=*/true);
     need_sync = true;
+#endif
     return cpu_tensor;
 }
 
@@ -40,7 +45,11 @@ void syncPinnedCpuCopies(bool need_sync) {
     // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
     // The copy launch returns quickly; only this worker thread blocks on its
     // stream while the main engine thread can continue issuing CUDA work.
+#if USING_ASCEND
+    // No explicit stream handle on Ascend; the default stream is synchronous.
+#else
     cuda_graph::graphGetCurrentStream().synchronize();
+#endif
 }
 
 }  // namespace

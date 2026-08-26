@@ -152,22 +152,6 @@ class LayerKVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
     @property
-    def k_cache_base(self) -> torch.Tensor:
-        """
-        K cache tensor (separate, NHD layout)
-        """
-
-    @k_cache_base.setter
-    def k_cache_base(self, arg0: torch.Tensor) -> None: ...
-    @property
-    def v_cache_base(self) -> torch.Tensor:
-        """
-        V cache tensor (separate, NHD layout)
-        """
-
-    @v_cache_base.setter
-    def v_cache_base(self, arg0: torch.Tensor) -> None: ...
-    @property
     def layer_id(self) -> int:
         """
         Global layer id
@@ -266,8 +250,10 @@ class PyAttentionInputs:
     headwise_config: dict | None
     kv_cache_kernel_block_id: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor
+    kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
+    kv_cache_block_id_host: torch.Tensor
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property

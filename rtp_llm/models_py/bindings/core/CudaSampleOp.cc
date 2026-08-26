@@ -26,7 +26,7 @@ namespace rtp_llm {
 
 namespace {
 
-struct RejectionSamplingLaunchConfig {
+struct [[maybe_unused]] RejectionSamplingLaunchConfig {
     int batch_size;
     int num_speculative_tokens;
     int target_vocab_size;
@@ -49,7 +49,7 @@ void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::D
     RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as draft_token_ids_d", name);
 }
 
-RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
+[[maybe_unused]] RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
     // An in-model proposer (DSpARK) emits draft tokens, not per-vocab draft
     // probabilities. In that case draft_probs_d is intentionally undefined and
     // the kernel treats q(draft_token) == 1, so all shapes must be derived from
@@ -733,9 +733,19 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
-void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+torch::Tensor sampleFromProbs(const torch::Tensor&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "DSpARK stochastic probability sampling currently requires CUDA");
+    return {};
 }
+
+void rejectionSampling(const RejectionSamplingParams&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling currently requires CUDA");
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "mappingDraft2Target currently requires CUDA");
+}
+
 
 #else  // !USING_CUDA — ROCm platform
 

@@ -285,7 +285,10 @@ cc_library(
 
 cc_library(
     name = "vocab_prune_kernels",
-    srcs = ["vocab_prune/mapping.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["vocab_prune/mapping.cu"],
+    }),
     hdrs = ["vocab_prune/mapping.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",

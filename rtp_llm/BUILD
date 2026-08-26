@@ -271,6 +271,7 @@ py_library(
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
+        "@//:using_ascend": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
 )

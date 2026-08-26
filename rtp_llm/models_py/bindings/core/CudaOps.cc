@@ -160,7 +160,7 @@ void launchPackedMaskLogits(const torch::Tensor& logits,
 }
 #endif
 
-void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
+[[maybe_unused]] void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                                       const torch::Tensor& packed_allow_mask,
                                       const torch::Tensor& row_indices,
                                       size_t               vocab_size) {
@@ -426,6 +426,19 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
     logits.masked_fill_(mask_float.to(torch::kBool) == 0, -1e9f);
 }
 
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  const torch::Tensor& row_indices,
+                                  size_t               vocab_size) {
+    applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
+}
+
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  size_t               vocab_size) {
+    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, torch::Tensor{}, vocab_size);
+}
+
 #else  // ROCm / non-CUDA
 
 namespace {
@@ -603,7 +616,7 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
         batchCopyFallback(fallback_copies);
     }
 }
-#else
+#elif !USING_ASCEND
 void runtimeBatchCopy(const BatchCopyParams& params) {
     batchCopyFallback(params);
 }

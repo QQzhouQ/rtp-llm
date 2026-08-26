@@ -153,7 +153,7 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
 
 #elif USING_ASCEND
 
-BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params) {
+BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

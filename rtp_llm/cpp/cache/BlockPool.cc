@@ -46,6 +46,8 @@ const char* memoryTypeName(MemoryType memory_type) {
             return "CPU_PINNED";
         case MemoryType::MEMORY_GPU:
             return "GPU";
+        case MemoryType::MEMORY_NPU:
+            return "NPU";
     }
     return "UNKNOWN";
 }

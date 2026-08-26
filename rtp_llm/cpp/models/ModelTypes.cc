@@ -417,7 +417,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor byte size exceeds int64");
         const auto nb      = static_cast<int64_t>(raw_nbytes);
         const auto aligned = align_up(nb, kPackAlignment);
-        if (tp->is_cuda() || tp->is_privateuse1()) {
+        if (tp->is_cuda() || tp->is_privateuseone()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
             RTP_LLM_CHECK_WITH_INFO(gpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
                                     "tpSyncModelInputs GPU packed-buffer size overflow");

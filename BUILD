@@ -92,6 +92,14 @@ config_setting(
     values = {"define": "using_ascend=true"},
 )
 
+config_setting(
+    name = "using_ascend_arm",
+    define_values = {
+        "using_ascend": "true",
+        "using_arm": "true",
+    },
+)
+
 
 config_setting(
     name = "rocm_gfx950",

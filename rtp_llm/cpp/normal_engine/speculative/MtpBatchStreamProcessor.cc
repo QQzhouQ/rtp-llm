@@ -539,9 +539,11 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
+#if !USING_ASCEND
         if (spec_logits_result.ready_event) {
             spec_logits_result.ready_event->block(cuda_graph::graphGetCurrentStream());
         }
+#endif
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
 

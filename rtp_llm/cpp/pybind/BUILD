@@ -64,6 +64,9 @@ cc_library(
         "ComputeInit.cc",
     ] + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
+        # main split exec ops: ExecOps.cc compiled directly into the .so via
+        # exec_ops_srcs (so registerExecCtxOps is exported); Cuda* impls linked
+        # as deps from exec_ctx_ops (alwayslink).
         "@//:using_ascend": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
         "//conditions:default": [],
     }),
