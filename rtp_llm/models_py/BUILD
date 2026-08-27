@@ -76,6 +76,7 @@ py_library(
         ],
         "@//:using_ascend": [
             "//rtp_llm/models_py/modules/base/ascend:ascend_base",
+            "//rtp_llm/models_py/modules/factory/fused_moe/impl/ascend:ascend_moe",
         ],
         "//conditions:default": [],
     }) + select({
