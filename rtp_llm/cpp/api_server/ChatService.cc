@@ -197,10 +197,7 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
     auto       chat_render    = openai_endpoint_->getChatRender();
-    RenderedInputs rendered_input{{}, {}, body};
-    if (chat_render) {
-        rendered_input = chat_render->render_chat_request(body);
-    }
+    const auto rendered_input = chat_render->render_chat_request(body);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);

@@ -84,10 +84,7 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
     config.stop_words_list.insert(
         config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
-    std::vector<std::vector<int>> request_stop_words_list_ids;
-    if (chat_render_) {
-        request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
-    }
+    auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
     config.stop_words_list.insert(
         config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
     // if (req.chat_id.has_value()) {
@@ -136,7 +133,7 @@ std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_reque
     debug_info.eos_token_id       = eos_token_id_;
     debug_info.stop_word_ids_list = stop_word_ids_list_;
     debug_info.stop_words_list    = stop_words_list_;
-    debug_info.renderer_info      = chat_render_ ? chat_render_->toString() : "";
+    debug_info.renderer_info      = chat_render_->toString();
     debug_info.generate_config    = *(extract_generation_config(chat_request));
 
     return ToJsonString(debug_info, true);
