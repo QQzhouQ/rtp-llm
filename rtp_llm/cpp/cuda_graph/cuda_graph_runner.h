@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <atomic>
 #include <unordered_map>
 #include <vector>
@@ -52,19 +53,11 @@ public:
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32)
-#if USING_ASCEND
-            .device(torch::kPrivateUse1)
-#else
-            .device(torch::kCUDA)
-#endif
+            .device(getTorchCudaDevice())
             .requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_)
-#if USING_ASCEND
-            .device(torch::kPrivateUse1)
-#else
-            .device(torch::kCUDA)
-#endif
+            .device(getTorchCudaDevice())
             .requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \

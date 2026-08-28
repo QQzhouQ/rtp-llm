@@ -227,11 +227,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor storage size overflow");
         auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
-#if USING_ASCEND
-            options = options.device(torch::kPrivateUse1);
-#else
-            options = options.device(torch::kCUDA);
-#endif
+            options = options.device(getTorchCudaDevice());
         }
         auto tensor = torch::empty(dims, options);
         // NCCL broadcast requires pinned memory for CPU buffers
@@ -449,11 +445,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     if (gpu_total_bytes > 0) {
         gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8)
-#if USING_ASCEND
-                                 .device(torch::kPrivateUse1));
-#else
-                                 .device(torch::kCUDA));
-#endif
+                                 .device(getTorchCudaDevice()));
         if (is_root) {
             auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
             FusedD2DCopyParams fused_params;

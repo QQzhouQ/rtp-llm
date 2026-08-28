@@ -160,7 +160,7 @@ void launchPackedMaskLogits(const torch::Tensor& logits,
 }
 #endif
 
-[[maybe_unused]] void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
+void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                                       const torch::Tensor& packed_allow_mask,
                                       const torch::Tensor& row_indices,
                                       size_t               vocab_size) {

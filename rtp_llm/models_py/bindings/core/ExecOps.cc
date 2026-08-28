@@ -546,7 +546,6 @@ void cudaCheckLastError() {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
 #elif USING_ASCEND
-    // TODO: Ascend - fix ascend check last error?
     ASCEND_CHECK(aclrtSynchronizeDevice());
     ASCEND_CHECK_ERROR();
 #endif
@@ -561,7 +560,6 @@ void cudaProfilerBegin() {
     check_cuda_value(cudaProfilerStart());
 #else
     // no-op on ROCm / Ascend
-    // TODO: Ascend - fix profiler on Ascend
 #endif
 }
 
@@ -570,7 +568,6 @@ void cudaProfilerEnd() {
     check_cuda_value(cudaProfilerStop());
 #else
     // no-op on ROCm / Ascend
-    // TODO: Ascend - fix profiler on Ascend
 #endif
 }
 
@@ -844,11 +841,7 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
     states.ep_size                 = params.ep_size;
     states.log_exp_num             = params.log_exp_num;
     states.phy_exp_num             = params.phy_exp_num;
-#if USING_ASCEND
-    torch::Device moe_device = torch::Device(torch::kPrivateUse1);
-#else
-    torch::Device moe_device = torch::Device(torch::kCUDA);
-#endif
+    torch::Device moe_device = getTorchCudaDevice();
     states.stats_buf.log_stats_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.log_exp_num},
                                                   torch::TensorOptions(torch::kInt32).device(moe_device));
     states.stats_buf.gpu_loads_buf = torch::zeros({(int64_t)params.layer_num, (int64_t)params.ep_size},

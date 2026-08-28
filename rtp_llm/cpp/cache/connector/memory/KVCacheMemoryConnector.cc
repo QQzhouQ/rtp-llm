@@ -1,3 +1,4 @@
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 
 #include <algorithm>
@@ -2749,11 +2750,7 @@ bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&          
 
     auto to_device = [](bool is_accel) -> torch::Device {
         if (!is_accel) return torch::kCPU;
-#if USING_ASCEND
-        return torch::Device(torch::kPrivateUse1);
-#else
-        return torch::kCUDA;
-#endif
+        return getTorchCudaDevice();
     };
     auto mem_device = to_device(mem_block.is_cuda);
     auto gpu_device = to_device(gpu_block.is_cuda);

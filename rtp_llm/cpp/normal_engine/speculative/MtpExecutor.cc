@@ -136,29 +136,17 @@ torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& hold
         return tensor;
     }
     if (tensor.numel() == 0) {
-#if USING_ASCEND
-        return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kPrivateUse1));
-#else
-        return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
-#endif
+        return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(getTorchCudaDevice()));
     }
     holder.hold_host(tensor);
-#if USING_ASCEND
-    return tensor.to(torch::kPrivateUse1, /*non_blocking=*/true);
-#else
-    return tensor.to(torch::kCUDA, /*non_blocking=*/true);
-#endif
+    return tensor.to(getTorchCudaDevice(), /*non_blocking=*/true);
 }
 
 torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined()) {
         return tensor;
     }
-#if USING_ASCEND
-    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kPrivateUse1);
-#else
-    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-#endif
+    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     if ((tensor.is_cuda() || tensor.is_privateuseone()) && tensor.scalar_type() == torch::kInt32) {
         return tensor;
     }
@@ -468,17 +456,11 @@ static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
         return sp_buffer;
     }
 
-    auto fake_hidden_states = torch::zeros(
-        {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type))
-#if USING_ASCEND
-            .device(torch::kPrivateUse1));
+    auto device = getTorchCudaDevice();
+    auto fake_hidden_states =
+        torch::zeros({1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(device));
     auto fake_probs =
-        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kPrivateUse1));
-#else
-            .device(torch::kCUDA));
-    auto fake_probs =
-        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
-#endif
+        torch::zeros({1, (int64_t)vocab_size}, torch::TensorOptions().dtype(torch::kFloat).device(device));
     sp_buffer->all_probs     = fake_probs;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
@@ -565,13 +547,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
 #if USING_ASCEND
-    // Ascend async runners execute on a worker thread over the default NPU stream.
-    collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
-    target_verify_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
-    draft_prefill_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
+    // Ascend async runners execute on a worker thread over the default NPU stream;
+    // CUDA/ROCm take dedicated pool streams.
+    collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
+    target_verify_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
+    draft_prefill_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
-    spec_logits_verify_async_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))),
-    spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))) {
+    spec_logits_verify_async_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
+    spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())) {
 #else
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -1122,21 +1105,13 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
             return tensor;
         }
         if (tensor.numel() == 0) {
-#if USING_ASCEND
-            return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kPrivateUse1));
-#else
-            return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
-#endif
+            return torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(getTorchCudaDevice()));
         }
         if (!tensor.is_pinned()) {
             RTP_LLM_LOG_WARNING("[mtp-grpc] grpc tensor is not pinned; H2D copy may block");
         }
         host_holder.hold_host(tensor);
-#if USING_ASCEND
-        return tensor.to(torch::kPrivateUse1, /*non_blocking=*/true);
-#else
-        return tensor.to(torch::kCUDA, /*non_blocking=*/true);
-#endif
+        return tensor.to(getTorchCudaDevice(), /*non_blocking=*/true);
     };
 
     for (auto& stream : streams) {

@@ -1,14 +1,11 @@
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <limits>
 #include <memory>
 #include <numeric>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
-#if USING_ASCEND
-#define DEVICE_TYPE torch::kPrivateUse1
-#else
-#define DEVICE_TYPE torch::kCUDA
-#endif
+#define DEVICE_TYPE getTorchCudaDevice()
 
 #define private public
 #define protected public

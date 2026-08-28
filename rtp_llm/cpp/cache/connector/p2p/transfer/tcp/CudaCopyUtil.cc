@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -27,11 +28,7 @@ bool CudaCopyUtil::batchCopyToHost(std::vector<CopyTask>& tasks) {
             return false;
         }
         params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size,
-#if USING_ASCEND
-            torch::Device(torch::kPrivateUse1)
-#else
-            torch::kCUDA
-#endif
+            getTorchCudaDevice()
         ));
         params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, torch::kCPU));
     }
@@ -56,11 +53,7 @@ bool CudaCopyUtil::batchCopyToDevice(std::vector<CopyTask>& tasks) {
         }
         params.multi_src.push_back(wrapRawPtr(task.src_ptr, task.size, torch::kCPU));
         params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size,
-#if USING_ASCEND
-            torch::Device(torch::kPrivateUse1)
-#else
-            torch::kCUDA
-#endif
+            getTorchCudaDevice()
         ));
     }
 

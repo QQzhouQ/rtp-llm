@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
@@ -23,11 +24,7 @@
 using namespace std;
 namespace W = rtp_llm::W;
 
-#if USING_ASCEND
-#define DEVICE_TYPE torch::kPrivateUse1
-#else
-#define DEVICE_TYPE torch::kCUDA
-#endif
+#define DEVICE_TYPE getTorchCudaDevice()
 
 namespace rtp_llm {
 
