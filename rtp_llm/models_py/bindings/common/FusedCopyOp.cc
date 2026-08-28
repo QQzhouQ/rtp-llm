@@ -22,6 +22,22 @@
 
 namespace rtp_llm {
 
+#if USING_ASCEND
+// The CUDA kernel is direction-agnostic (raw deref); the aclrt memcpy API is
+// not, so pick the kind from the actual source pointer location. All current
+// Ascend call sites flush host-pinned staging buffers into device tensors
+// (H2D); the device-resident branch future-proofs D2D reuse (e.g. graph mode).
+static inline aclrtMemcpyKind memcpyKindFor(const void* src) {
+    aclrtPtrAttributes attr{};
+    if (aclrtPointerGetAttributes(src, &attr) == ACL_SUCCESS
+        && attr.location.type != ACL_MEM_LOCATION_TYPE_HOST
+        && attr.location.type != ACL_MEM_LOCATION_TYPE_UNREGISTERED) {
+        return ACL_MEMCPY_DEVICE_TO_DEVICE;
+    }
+    return ACL_MEMCPY_HOST_TO_DEVICE;
+}
+#endif
+
 void fusedCopy(const FusedD2DCopyParams& params) {
 #if USING_CUDA
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -34,7 +50,7 @@ void fusedCopy(const FusedD2DCopyParams& params) {
     for (int i = 0; i < params.num_copies; ++i) {
         ASCEND_CHECK(aclrtMemcpyAsync(params.dst[i], params.size[i],
                                        params.src[i], params.size[i],
-                                       ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                                       memcpyKindFor(params.src[i]), stream));
     }
 #else
     throw std::runtime_error("No supported GPU backend found for fusedCopy");
@@ -58,7 +74,7 @@ void fusedStridedCopy(const FusedStridedCopyParams& params) {
             void*       dst_ptr = dst_base + row * params.dst_row_stride[i];
             ASCEND_CHECK(aclrtMemcpyAsync(dst_ptr, params.row_bytes[i],
                                            src_ptr, params.row_bytes[i],
-                                           ACL_MEMCPY_HOST_TO_DEVICE, stream));
+                                           memcpyKindFor(src_ptr), stream));
         }
     }
 #else
