@@ -285,6 +285,8 @@ void BlockPool::initializeCudaMallocBuffer() {
 }
 
 void BlockPool::initializeLayerMappings() {
+    torch::Tensor full_tensor = cache_aligned_buffer_;
+
     size_t total_layers = 0;
     for (const auto& layout_cfg : config_.memory_layouts) {
         total_layers += static_cast<size_t>(layout_cfg.layer_num);
@@ -296,10 +298,11 @@ void BlockPool::initializeLayerMappings() {
 
 void BlockPool::initializeLayoutStrategies() {
     layout_strategies_.resize(config_.memory_layouts.size());
+    torch::Tensor full_tensor = cache_aligned_buffer_;
 
     size_t global_layer_begin = 0;
     for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
-        processMemoryLayout(layout_idx, cache_aligned_buffer_, global_layer_begin);
+        processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
         global_layer_begin += static_cast<size_t>(config_.memory_layouts[layout_idx].layer_num);
     }
 }
@@ -367,8 +370,7 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             layout_idx);
 
     RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(
-            layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
+        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
         "Failed to initialize memory layout strategy for layout[%zu]",
         layout_idx);
 }
@@ -376,6 +378,7 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
 void BlockPool::processLayerTensors(size_t                    layout_idx,
                                     const MemoryLayoutConfig& layout_cfg,
                                     size_t&                   global_layer_begin) {
+    // 获取层张量
     auto layer_tensors = layout_strategies_[layout_idx]->getLayerCacheTensors();
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),
                             "layout[%zu] layer tensors size mismatch: got=%zu expect=%u",
@@ -383,6 +386,7 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
                             layer_tensors.size(),
                             layout_cfg.layer_num);
 
+    // 映射全局层到局部层，并设置KV张量
     for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
         const size_t global_layer = global_layer_begin + local_layer;
         RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
@@ -390,6 +394,7 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
         global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
     }
 
+    // 处理缩放张量（如果存在）
     auto scale_tensors = layout_strategies_[layout_idx]->getLayerScaleCacheTensors();
     if (!scale_tensors.empty()) {
         RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() == static_cast<size_t>(layout_cfg.layer_num),

@@ -12,9 +12,9 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                 torch::Tensor&            kv_cache_tensor,
                                 torch::Tensor&            kv_scale_tensor,
                                 void*                     cache_base_ptr) {
-    config_            = config;
-    cache_base_ptr_    = cache_base_ptr;
-    data_type_         = config_.dtype;
+    config_         = config;
+    cache_base_ptr_ = cache_base_ptr;
+    data_type_      = config_.dtype;
 
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "kv cache tensor is empty, cannot split by layers");

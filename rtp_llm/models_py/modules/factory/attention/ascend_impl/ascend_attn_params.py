@@ -38,7 +38,7 @@ def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     """Build AscendAttnParams from PyAttentionInputs."""
     params = AscendAttnParams()
 
-    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)
+    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)
 
     if attn_inputs.sequence_lengths.numel() > 0:
         params.seq_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
@@ -69,7 +69,7 @@ def compute_ascend_attn_params(attn_inputs):
             - prefix_lengths: [B] int32 (CPU or NPU)
             - input_lengths: [B] int32 (CPU or NPU)
             - sequence_lengths: [B] int32 (CPU or NPU)
-            - kv_cache_block_id_host: [B, max_blocks] int32 (CPU)
+            - kv_cache_block_id: [B, max_blocks] int32 (CPU, host mirror per main 5466bafd6)
             - kv_cache: object with seq_size_per_block
 
     Returns:
@@ -77,7 +77,7 @@ def compute_ascend_attn_params(attn_inputs):
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
-    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)  # always on CPU
+    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)  # always on CPU
     page_size = (attn_inputs.kv_cache.seq_size_per_block
                  if attn_inputs.kv_cache is not None else 128)
 

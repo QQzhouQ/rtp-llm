@@ -188,13 +188,12 @@ private:
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = cache_config.block_num;
+        cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
+        cfg.kv_scale_stride_bytes = kv_scale_stride_bytes;
         cfg.k_scale_stride_bytes  = spec->k_scale_block_size_bytes();
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
-
-        cfg.kv_block_stride_bytes = kv_block_stride_bytes;
-        cfg.kv_scale_stride_bytes = kv_scale_stride_bytes;
 
         cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
         cfg.dtype                   = spec->memoryLayoutDType();

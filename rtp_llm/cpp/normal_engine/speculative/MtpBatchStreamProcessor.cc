@@ -494,12 +494,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     sampler_inputs.vocab_size = vocab_size_;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
-                                                torch::TensorOptions().dtype(torch::kFloat32)
-#if USING_ASCEND
-                                                    .device(torch::kPrivateUse1));
-#else
-                                                    .device(torch::kCUDA));
-#endif
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(getTorchCudaDevice()));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
         }
@@ -1240,11 +1235,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
             propose_all_probs = draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
-#if USING_ASCEND
-                                    .to(torch::kPrivateUse1).clone();
-#else
-                                    .to(torch::kCUDA).clone();
-#endif
+                                    .to(getTorchCudaDevice()).clone();
         }
 
         torch::Tensor last_hidden_states;
@@ -1292,11 +1283,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
             propose_all_probs = draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
-#if USING_ASCEND
-                                    .to(torch::kPrivateUse1).clone();
-#else
-                                    .to(torch::kCUDA).clone();
-#endif
+                                    .to(getTorchCudaDevice()).clone();
         }
 
         // This scalar read runs on the bookkeeping worker after accept_len is
@@ -1378,12 +1365,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     } else {
         RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_hidden_states.fused_copy");
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
-                                         torch::TensorOptions().dtype(dtype)
-#if USING_ASCEND
-                                             .device(torch::kPrivateUse1));
-#else
-                                             .device(torch::kCUDA));
-#endif
+                                         torch::TensorOptions().dtype(dtype).device(getTorchCudaDevice()));
 
         bool all_sources_fused_copy_ready = true;
         for (auto& stream : all_streams) {

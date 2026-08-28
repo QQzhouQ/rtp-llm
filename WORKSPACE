@@ -80,8 +80,5 @@ pip_gpu_rocm_torch_install_deps()
 load("@pip_ascend_torch//:requirements.bzl", pip_ascend_torch_install_deps = "install_deps")
 pip_ascend_torch_install_deps()
 
-load("@pip_ascend_arm_torch//:requirements.bzl", pip_ascend_arm_torch_install_deps = "install_deps")
-pip_ascend_arm_torch_install_deps()
-
 load("//:def.bzl", "read_release_version")
 read_release_version(name = "release_version")

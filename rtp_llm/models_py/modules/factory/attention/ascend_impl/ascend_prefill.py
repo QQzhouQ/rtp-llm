@@ -124,7 +124,7 @@ class AscendPrefillAttnOp:
         self.params = params
 
     def prepare(self, attn_inputs):
-        self.block_table = attn_inputs.kv_cache_kernel_block_id_host
+        self.block_table = attn_inputs.kv_cache_kernel_block_id
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:

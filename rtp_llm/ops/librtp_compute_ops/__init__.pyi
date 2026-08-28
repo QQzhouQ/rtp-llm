@@ -250,10 +250,8 @@ class PyAttentionInputs:
     headwise_config: dict | None
     kv_cache_kernel_block_id: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
-    kv_cache_block_id_host: torch.Tensor
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property

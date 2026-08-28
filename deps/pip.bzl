@@ -92,10 +92,3 @@ def pip_deps():
         timeout = 12000,
     )
 
-    pip_parse(
-        name = "pip_ascend_arm_torch",
-        requirements_lock = "@rtp_deps//:requirements_lock_ascend.txt",
-	python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
-        timeout = 12000,
-    )
