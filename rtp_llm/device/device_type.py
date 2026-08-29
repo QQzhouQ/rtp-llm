@@ -43,3 +43,12 @@ def is_hip() -> bool:
 
 def is_ascend() -> bool:
     return get_device_type() == DeviceType.Ascend
+
+
+def device_count() -> int:
+    """Local accelerator count: NPU on Ascend, GPU otherwise."""
+    if is_ascend():
+        import torch_npu  # noqa: F401  (registers torch.npu)
+
+        return torch.npu.device_count()
+    return torch.cuda.device_count()

@@ -25,6 +25,14 @@
 
 namespace py = pybind11;
 
+namespace at {
+namespace cuda {
+// Forward declaration suffices for the reference parameter below; Ascend
+// builds never include ATen/cuda/CUDAGraph.h (it pulls cuda_runtime_api.h).
+struct CUDAGraph;
+}  // namespace cuda
+}  // namespace at
+
 namespace rtp_llm {
 #if USING_ROCM
 namespace rocm {
@@ -128,15 +136,13 @@ inline void graphSetCurrentStream(GraphStream stream) {
 }
 
 inline torch::Event makeGraphEvent() {
-#if USING_ASCEND
-    return torch::Event(torch::kPrivateUse1);
-#else
     return torch::Event(GRAPH_DEVICE_TYPE);
-#endif
 }
 
-// Event/stream ordering helpers. Ascend's GraphStream is an opaque handle, so
-// cross-stream record/block pairs degrade to stream-synchronous semantics.
+// Event/stream ordering helpers. Ascend relies on single-stream execution
+// order: cross-stream event dependencies are dropped (no-ops). Do not enable
+// useStreamAsync()/DROP_BROAD_SYNC on Ascend until real aclrtEvent-backed
+// record/block land here — doing so would silently introduce data races.
 inline void graphRecordEvent(torch::Event& event, GraphStream stream) {
 #if USING_ASCEND
     (void)event;
@@ -169,11 +175,7 @@ void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
 size_t          graphReservedBytes();
 size_t          graphAllocatedBytes();
 GraphPoolHandle graphPoolHandle();
-#if USING_CUDA || USING_ROCM
 void            graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool);
-#else
-void            graphCaptureBegin(void* graph, GraphPoolHandle pool);
-#endif
 
 }  // namespace cuda_graph
 }  // namespace rtp_llm
