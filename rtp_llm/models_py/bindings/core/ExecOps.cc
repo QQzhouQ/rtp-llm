@@ -596,7 +596,7 @@ ExecStatus getGpuExecStatus() {
 
 torch::Device getTorchCudaDevice() {
 #if USING_ASCEND
-    return torch::Device(torch::kPrivateUse1);
+    return torch::Device(torch::kPrivateUse1, static_cast<c10::DeviceIndex>(ascend::getDevice()));
 #else
     return torch::Device(torch::kCUDA);
 #endif
