@@ -145,7 +145,7 @@ def _get_cuda_device_list(dev_count: int) -> List[str]:
     visible_devices = (
         os.environ.get("CUDA_VISIBLE_DEVICES", None)
         if not is_ascend()
-        else os.environ.get("ASCEND_RT_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", None))
+        else os.environ.get("ASCEND_RT_VISIBLE_DEVICES")  # CANN only honors the NPU var; unset -> full range
     )
     return (
         visible_devices.split(",")
