@@ -51,11 +51,14 @@ class BackendManager(object):
         )
 
         if engine_config.parallelism_config.world_size > 1:
+            from rtp_llm.device.device_type import get_device_type, DeviceType
+
+            dist_backend = "hccl" if get_device_type() == DeviceType.Ascend else "nccl"
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
-                backend="nccl",
+                backend=dist_backend,
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
         world_info = get_world_info(

@@ -75,7 +75,7 @@ def init_distributed_environment(
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
-    assert backend in ["nccl"], "backend current only supports nccl"
+    assert backend in ["nccl", "hccl"], f"backend current only supports nccl/hccl, got {backend}"
     ip = nccl_comm_config.nccl_ip
     port = nccl_init_port
     world_rank = parallelism_config.world_rank
@@ -277,11 +277,29 @@ def _register_process_groups_to_cpp():
     # The module-level functions have different signatures and semantics (e.g. all_gather
     # allocates a new tensor), so we implement the C++ contract directly here.
 
-    def _ensure_cuda(t: torch.Tensor, device_id: int):
-        """Move CPU tensor to CUDA if needed (NCCL requires CUDA tensors)."""
-        if t.is_cuda:
+    # Detect accelerator runtime once (per registration), not per-op.
+    def _npu_runtime() -> bool:
+        try:
+            import torch_npu  # noqa: F401
+
+            return torch.npu.is_available()
+        except ImportError:
+            return False
+
+    _is_npu = _npu_runtime()
+
+    def _accel_device() -> torch.device:
+        """Current accelerator device bound to this process (NPU on Ascend, CUDA otherwise)."""
+        if _is_npu:
+            return torch.device("npu", torch.npu.current_device())
+        return torch.device("cuda", torch.cuda.current_device())
+
+    def _ensure_accel(t: torch.Tensor, device: torch.device):
+        """Move CPU tensor to the accelerator if the comm backend requires it
+        (NCCL/HCCL only accept device tensors). Non-CPU tensors (cuda/npu) pass through."""
+        if not t.is_cpu:
             return t, False
-        return t.to(torch.device("cuda", device_id)), True
+        return t.to(device), True
 
     def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
         """Broadcast tensors from root rank to all ranks in the group.
@@ -295,12 +313,12 @@ def _register_process_groups_to_cpp():
         if pg is None or pg.size() < 2:
             return
         global_root = torch.distributed.get_global_rank(pg, root)
-        device_id = torch.cuda.current_device()
+        device = _accel_device()
         for t in tensors:
-            gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, global_root, group=pg)
+            dev_t, was_cpu = _ensure_accel(t, device)
+            torch.distributed.broadcast(dev_t, global_root, group=pg)
             if was_cpu:
-                t.copy_(gpu_t)
+                t.copy_(dev_t)
 
     _REDUCE_OPS = {
         0: torch.distributed.ReduceOp.SUM,
@@ -329,13 +347,13 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
-        device_id = torch.cuda.current_device()
-        gpu_t, was_cpu = _ensure_cuda(target, device_id)
+        device = _accel_device()
+        dev_t, was_cpu = _ensure_accel(target, device)
         torch.distributed.all_reduce(
-            gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            dev_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
         )
         if was_cpu:
-            target.copy_(gpu_t)
+            target.copy_(dev_t)
         return target
 
     def cpp_allgather(
@@ -356,30 +374,26 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
-        device_id = torch.cuda.current_device()
+        device = _accel_device()
         rank = pg.rank()
         world_size = pg.size()
         for i, recv_buf in enumerate(recv_buffers):
             data_num = recv_buf.numel() // world_size
-            recv_on_cpu = not recv_buf.is_cuda
-            gpu_recv = (
-                recv_buf.to(torch.device("cuda", device_id))
-                if recv_on_cpu
-                else recv_buf
-            )
-            gpu_recv_flat = gpu_recv.reshape(-1)
+            recv_on_cpu = recv_buf.is_cpu
+            dev_recv = recv_buf.to(device) if recv_on_cpu else recv_buf
+            dev_recv_flat = dev_recv.reshape(-1)
             if inplace:
-                send_tensor = gpu_recv_flat.narrow(
+                send_tensor = dev_recv_flat.narrow(
                     0, rank * data_num, data_num
                 ).contiguous()
             else:
                 send_t = send_buffers[i]
-                send_tensor, _ = _ensure_cuda(send_t, device_id)
+                send_tensor, _ = _ensure_accel(send_t, device)
             torch.distributed.all_gather_into_tensor(
-                gpu_recv_flat, send_tensor, group=pg
+                dev_recv_flat, send_tensor, group=pg
             )
             if recv_on_cpu:
-                recv_buf.copy_(gpu_recv)
+                recv_buf.copy_(dev_recv)
 
     librtp_compute_ops.register_comm_ops(cpp_broadcast, cpp_allreduce, cpp_allgather)
     logging.info(

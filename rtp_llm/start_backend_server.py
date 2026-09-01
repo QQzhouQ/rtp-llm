@@ -432,11 +432,17 @@ def start_backend_server(
 
         return vit_start_server()
 
-    if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+    from rtp_llm.device.device_type import get_device_type, DeviceType
+
+    device_type = get_device_type()
+    if device_type == DeviceType.Ascend:
+        _dev_count = torch.npu.device_count()
+    elif device_type in (DeviceType.Cuda, DeviceType.ROCm):
+        _dev_count = torch.cuda.device_count()
+    else:
+        _dev_count = 1
 
     pc = py_env_configs.parallelism_config
-    _dev_count = torch.npu.device_count() if (not torch.cuda.is_available()) else torch.cuda.device_count()
     if (
         pc.world_size % _dev_count != 0
         and pc.world_size > _dev_count
