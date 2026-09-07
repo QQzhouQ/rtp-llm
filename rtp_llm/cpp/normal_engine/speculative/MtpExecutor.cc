@@ -531,6 +531,25 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     return fake_stream;
 }
 
+namespace speculative {
+
+// Platform gate for speculative decoding (MTP/EAGLE/DSpark). Ascend support is
+// NOT fully migrated yet: rejection sampling (SpeculativeSampler kernels),
+// several torch::kCUDA allocations and is_cuda()-only device-state paths in
+// this executor have no NPU implementation. Until the migration lands, the
+// executor refuses construction on Ascend instead of failing (or silently
+// corrupting) at the first decode step. Flip this to false-on-ascend removal
+// once all device paths are ported; MtpExecutorTest locks the contract.
+bool mtpExecutorPlatformUnsupported() {
+#if USING_ASCEND
+    return true;
+#else
+    return false;
+#endif
+}
+
+}  // namespace speculative
+
 MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
@@ -547,14 +566,32 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
 #if USING_ASCEND
-    // Ascend async runners execute on a worker thread over the default NPU stream;
-    // CUDA/ROCm take dedicated pool streams.
-    collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
-    target_verify_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
-    draft_prefill_prepare_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
+    // Ascend async runners execute on a worker thread over the default NPU
+    // stream. The stream must carry a concrete device index: AsyncRunner binds
+    // its worker via cuda_graph::setDevice(stream.device_index()), and an
+    // index-less PrivateUse1 device would leave the thread unbound (or fail
+    // aclrtSetDevice) on multi-card TP.
+    collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT,
+                                          torch::Device(torch::kPrivateUse1,
+                                                         static_cast<c10::DeviceIndex>(
+                                                             params.parallelism_config.local_rank)))),
+    target_verify_prepare_runner_(torch::Stream(c10::Stream::DEFAULT,
+                                                torch::Device(torch::kPrivateUse1,
+                                                              static_cast<c10::DeviceIndex>(
+                                                                  params.parallelism_config.local_rank)))),
+    draft_prefill_prepare_runner_(torch::Stream(c10::Stream::DEFAULT,
+                                                torch::Device(torch::kPrivateUse1,
+                                                              static_cast<c10::DeviceIndex>(
+                                                                  params.parallelism_config.local_rank)))),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
-    spec_logits_verify_async_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())),
-    spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT, getTorchCudaDevice())) {
+    spec_logits_verify_async_runner_(torch::Stream(c10::Stream::DEFAULT,
+                                                   torch::Device(torch::kPrivateUse1,
+                                                                 static_cast<c10::DeviceIndex>(
+                                                                     params.parallelism_config.local_rank)))),
+    spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT,
+                                            torch::Device(torch::kPrivateUse1,
+                                                          static_cast<c10::DeviceIndex>(
+                                                              params.parallelism_config.local_rank)))) {
 #else
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -563,6 +600,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
 #endif
+    // Fail-fast BEFORE touching any model/cache state: Ascend speculative
+    // decoding is not fully migrated (rejection sampling, kCUDA device-state
+    // paths); without this gate a spec request fails at the first decode step
+    // with an opaque error. See mtpExecutorPlatformUnsupported().
+    if (speculative::mtpExecutorPlatformUnsupported()) {
+        RTP_LLM_FAIL("speculative decoding (sp_type=%s) is not yet supported on Ascend NPU: "
+                     "MTP/EAGLE/DSpark executors still rely on CUDA-only rejection sampling and "
+                     "device-state kernels. Disable speculative decoding (remove the spec/draft "
+                     "model config) on Ascend until the migration completes.",
+                     SpeculativeExecutionConfig::to_string(propose_params ? propose_params->sp_type
+                                                                         : SP_TYPE_NONE)
+                         .c_str());
+    }
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
