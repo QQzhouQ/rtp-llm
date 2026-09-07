@@ -19,6 +19,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.device.device_type import device_count, is_ascend
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
@@ -89,6 +90,17 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
+        # Fail-fast at config time (review P1): Ascend speculative decoding is
+        # not fully migrated (CUDA-only rejection sampling / device-state
+        # kernels); MtpExecutor also refuses construction, but failing here
+        # gives the clearest message before any engine resource is allocated.
+        if is_ascend() and py_env_configs.sp_config.type != SpeculativeType.NONE:
+            raise RuntimeError(
+                f"Speculative decoding (sp_type={py_env_configs.sp_config.type}) is not yet "
+                "supported on Ascend NPU: rejection sampling and MTP device-state kernels "
+                "are CUDA-only. Remove the spec/draft model config on Ascend until the "
+                "migration completes."
+            )
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
@@ -439,7 +451,11 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    if not torch.cuda.is_available():
+    # Single-rank fast path only when NO accelerator backend is available:
+    # on Ascend torch.cuda.is_available() is false, but the NPU multi-rank
+    # path below must stay reachable (review P1: world_size>1 silently
+    # degraded to one rank otherwise).
+    if not torch.cuda.is_available() and not is_ascend():
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
     pc = py_env_configs.parallelism_config

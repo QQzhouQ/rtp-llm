@@ -105,7 +105,15 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     const auto layer  = cache.getLayerCache(0);
     const auto by_tag = cache.getLayerCache(0, "full");
     EXPECT_EQ(layer.seq_size_per_block, 2);
+    // Inner (H, ks) order is platform-specific: Ascend BSND [b, 2, ks, H, D]
+    // vs CUDA BSHD [b, 2, H, ks, D]. With H=1 the shapes coincide, so this
+    // alone cannot catch dim-order regressions — the marker-value tests above
+    // cover the element-level mapping.
+#if USING_ASCEND
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 2, 1, 4}));
+#else
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
+#endif
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
@@ -115,6 +123,115 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(cache.layerCount(), 1u);
     EXPECT_EQ(cache.getSeqSizePerBlock("full"), 8);
     EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 2);
+}
+
+// PR #1349 review P1 ("MHA 子块视图打乱 K/V 物理布局"): element-level marker
+// verification of the kernel-block view. The MHA memory contract is K/V
+// interleaved at KERNEL-block granularity — kernel block b owns a contiguous
+// K half [b*blk, b*blk+half) followed by its V half [b*blk+half, (b+1)*blk)
+// — with cache writers using kernel-granularity slots (see
+// compute_ascend_attn_params). Filling the pool with arange gives every
+// element a unique marker: any mis-mapping (e.g. re-chunking a
+// physical-[K-region][V-region] layout, which would read the next K sub-slice
+// as V when ratio > 1) changes values and fails here. Inner (H, seq) order
+// differs per platform: Ascend BSND [b, 2, ks, H, D] vs CUDA BSHD
+// [b, 2, H, ks, D], hence the #if'd expected strides.
+TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
+    const int64_t physical_blocks = 3;
+    const int64_t physical_seq    = 8;
+    const int64_t kernel_seq      = 2;  // ratio = 4 kernel blocks per physical block
+    const int64_t heads           = 3;
+    const int64_t head_dim        = 1;
+    const int64_t region_elems    = heads * physical_seq * head_dim;  // 24
+    const int64_t block_elems     = 2 * region_elems;                 // 48
+    const int64_t kernel_blocks   = physical_blocks * (physical_seq / kernel_seq);
+    const int64_t kblk_elems      = 2 * heads * kernel_seq * head_dim;  // 12
+    const int64_t half_elems      = kblk_elems / 2;                     // 6
+
+    const auto base = torch::arange(physical_blocks * block_elems, torch::TensorOptions().dtype(torch::kInt64))
+                         .reshape({physical_blocks, block_elems});  // marker == flat index
+    auto group = makeGroup("full",
+                           KVCacheSpecType::MultiHeadAttention,
+                           CacheGroupType::FULL,
+                           /*physical_seq_size=*/physical_seq,
+                           /*kernel_seq_size=*/kernel_seq,
+                           /*k_elems=*/region_elems,
+                           /*v_elems=*/region_elems,
+                           /*local_kv_heads=*/heads);
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, {}}}));
+
+    const auto layer = cache.getLayerCache(0);
+    EXPECT_EQ(layer.seq_size_per_block, kernel_seq);
+#if USING_ASCEND
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{kernel_blocks, 2, kernel_seq, heads, head_dim}));
+#else
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{kernel_blocks, 2, heads, kernel_seq, head_dim}));
+#endif
+    EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());  // zero-copy view
+
+    const auto& view = layer.kv_cache_base;
+    for (int64_t b = 0; b < kernel_blocks; ++b) {
+        for (int64_t kv = 0; kv < 2; ++kv) {
+            for (int64_t t = 0; t < kernel_seq; ++t) {
+                for (int64_t h = 0; h < heads; ++h) {
+                    for (int64_t d = 0; d < head_dim; ++d) {
+#if USING_ASCEND
+                        const int64_t flat = b * kblk_elems + kv * half_elems + t * heads * head_dim + h * head_dim + d;
+                        EXPECT_EQ(view[b][kv][t][h][d].item<int64_t>(), flat)
+                            << "b=" << b << " kv=" << kv << " t=" << t << " h=" << h;
+#else
+                        const int64_t flat = b * kblk_elems + kv * half_elems + h * kernel_seq * head_dim + t * head_dim + d;
+                        EXPECT_EQ(view[b][kv][h][t][d].item<int64_t>(), flat)
+                            << "b=" << b << " kv=" << kv << " t=" << t << " h=" << h;
+#endif
+                    }
+                }
+            }
+        }
+        // K and V of a kernel block are disjoint contiguous halves: the K half
+        // never reaches into the V half and vice versa.
+        EXPECT_EQ(view[b][0].min().item<int64_t>(), b * kblk_elems);
+        EXPECT_EQ(view[b][0].max().item<int64_t>(), b * kblk_elems + half_elems - 1);
+        EXPECT_EQ(view[b][1].min().item<int64_t>(), b * kblk_elems + half_elems);
+        EXPECT_EQ(view[b][1].max().item<int64_t>(), (b + 1) * kblk_elems - 1);
+    }
+}
+
+// ratio == 1 (kernel block == physical block): the kernel-block view must keep
+// the per-block contiguous [K region][V region] split byte-identical to the
+// physical layout, which is what existing single-granularity (128/128)
+// deployments rely on — locks "no behavior change" for them.
+TEST(KVCacheLayoutViewTest, MhaKernelViewRatioOneKeepsPerBlockKvHalves) {
+    const int64_t physical_blocks = 3;
+    const int64_t seq             = 8;  // kernel_seq == physical_seq
+    const int64_t heads           = 3;
+    const int64_t head_dim        = 2;
+    const int64_t region_elems    = heads * seq * head_dim;  // 48
+    const int64_t block_elems     = 2 * region_elems;         // 96
+
+    const auto base =
+        torch::arange(physical_blocks * block_elems, torch::TensorOptions().dtype(torch::kInt64))
+            .reshape({physical_blocks, block_elems});
+    auto group = makeGroup("full",
+                           KVCacheSpecType::MultiHeadAttention,
+                           CacheGroupType::FULL,
+                           /*physical_seq_size=*/seq,
+                           /*kernel_seq_size=*/seq,
+                           /*k_elems=*/region_elems,
+                           /*v_elems=*/region_elems,
+                           /*local_kv_heads=*/heads);
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, {}}}));
+
+    const auto flat = base.reshape(-1);
+    const auto view = cache.getLayerCache(0).kv_cache_base;
+    ASSERT_EQ(view.size(0), physical_blocks);
+    for (int64_t p = 0; p < physical_blocks; ++p) {
+        EXPECT_TRUE(torch::equal(view[p][0].reshape(-1), flat.slice(0, p * block_elems, p * block_elems + region_elems)))
+            << "K half of block " << p;
+        EXPECT_TRUE(
+            torch::equal(view[p][1].reshape(-1), flat.slice(0, p * block_elems + region_elems, (p + 1) * block_elems)))
+            << "V half of block " << p;
+    }
 }
 
 TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
