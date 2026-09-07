@@ -26,6 +26,18 @@ namespace torch_ext {
 // kernel-block granularity:
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, physical_elements_per_token]
+// MHA layout contract (ratio = seq_size_per_block / kernel_seq_size_per_block,
+// i.e. kernel blocks per physical block): every *kernel block* owns a
+// contiguous K slice followed by its V slice (K/V interleaved per kernel
+// block), NOT a full-K-then-full-V region per physical block. A direct
+// view({physical_blocks * ratio, 2, ...}) over the latter would misread the
+// (s+1)-th K sub-slice as the s-th kernel block's V when ratio > 1. Cache
+// writers must therefore use kernel-granularity slots (kernel block table *
+// kernel_seq_size; see compute_ascend_attn_params) so writes land inside this
+// view's interpretation; cache store/restore paths are unaffected because
+// they copy whole physical blocks as opaque bytes. With ratio == 1 the two
+// layouts are byte-identical, so existing single-granularity configs are
+// unchanged.
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
@@ -200,7 +212,11 @@ private:
                                     group.tag.c_str());
 #if USING_ASCEND
             // Ascend FIA/scatter ops expect BSND per-block layout:
-            // [blocks, 2, kernel_seq_size, local_kv_heads, head_dim].
+            // [blocks, 2, kernel_seq_size, local_kv_heads, head_dim] with K/V
+            // interleaved at kernel-block granularity — see the layout
+            // contract on LayerKVCache above. Correct for any ratio as long
+            // as cache writes use kernel-granularity slots; with ratio == 1 it
+            // is byte-identical to the physical [K region][V region] layout.
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, kernel_seq_size, local_kv_heads, head_dim});
 #else
