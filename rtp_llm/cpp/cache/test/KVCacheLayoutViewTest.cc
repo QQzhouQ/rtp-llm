@@ -90,13 +90,15 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
 }
 
 TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
+    // ratio == 1 geometry (kernel seq == physical seq): the supported and
+    // enforced configuration on Ascend.
     const auto         base  = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kFloat16)).reshape({3, 64});
     const auto         scale = torch::arange(3 * 16, torch::TensorOptions().dtype(torch::kFloat32)).reshape({3, 16});
     auto               group = makeGroup("full",
                            KVCacheSpecType::MultiHeadAttention,
                            CacheGroupType::FULL,
                            /*physical_seq_size=*/8,
-                           /*kernel_seq_size=*/2,
+                           /*kernel_seq_size=*/8,
                            /*k_elems=*/32,
                            /*v_elems=*/32,
                            /*local_kv_heads=*/1);
@@ -104,25 +106,25 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
 
     const auto layer  = cache.getLayerCache(0);
     const auto by_tag = cache.getLayerCache(0, "full");
-    EXPECT_EQ(layer.seq_size_per_block, 2);
+    EXPECT_EQ(layer.seq_size_per_block, 8);
     // Inner (H, ks) order is platform-specific: Ascend BSND [b, 2, ks, H, D]
     // vs CUDA BSHD [b, 2, H, ks, D]. With H=1 the shapes coincide, so this
-    // alone cannot catch dim-order regressions — the marker-value tests above
+    // alone cannot catch dim-order regressions — the marker-value tests below
     // cover the element-level mapping.
 #if USING_ASCEND
-    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 2, 1, 4}));
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{3, 2, 8, 1, 4}));
 #else
-    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{3, 2, 1, 8, 4}));
 #endif
-    EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
+    EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{3, 16}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
     EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
-    EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
+    EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{"full"}));
     EXPECT_EQ(cache.layerCount(), 1u);
     EXPECT_EQ(cache.getSeqSizePerBlock("full"), 8);
-    EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 2);
+    EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 8);
 }
 
 // Element-level marker verification of the kernel-block view. The MHA memory
@@ -144,9 +146,6 @@ TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
     const int64_t head_dim        = 1;
     const int64_t region_elems    = heads * physical_seq * head_dim;  // 24
     const int64_t block_elems     = 2 * region_elems;                 // 48
-    const int64_t kernel_blocks   = physical_blocks * (physical_seq / kernel_seq);
-    const int64_t kblk_elems      = 2 * heads * kernel_seq * head_dim;  // 12
-    const int64_t half_elems      = kblk_elems / 2;                     // 6
 
     const auto base = torch::arange(physical_blocks * block_elems, torch::TensorOptions().dtype(torch::kInt64))
                          .reshape({physical_blocks, block_elems});  // marker == flat index
@@ -160,31 +159,28 @@ TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
                            /*local_kv_heads=*/heads);
     torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, {}}}));
 
+#if USING_ASCEND
+    // Current constraint: ratio == 1 only. A subdivided block (ratio > 1) is
+    // rejected at view construction until the kernel-granular write path is
+    // validated end-to-end; lock the fail-fast here.
+    EXPECT_ANY_THROW((void)cache.getLayerCache(0));
+#else
     const auto layer = cache.getLayerCache(0);
     EXPECT_EQ(layer.seq_size_per_block, kernel_seq);
-#if USING_ASCEND
-    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{kernel_blocks, 2, kernel_seq, heads, head_dim}));
-#else
-    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{kernel_blocks, 2, heads, kernel_seq, head_dim}));
-#endif
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, heads, kernel_seq, head_dim}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());  // zero-copy view
 
-    const auto& view = layer.kv_cache_base;
+    const int64_t kernel_blocks = physical_blocks * (physical_seq / kernel_seq);  // 12
+    const int64_t kblk_elems    = 2 * heads * kernel_seq * head_dim;              // 12
+    const int64_t half_elems    = kblk_elems / 2;                                 // 6
+    const auto&   view          = layer.kv_cache_base;
     for (int64_t b = 0; b < kernel_blocks; ++b) {
         for (int64_t kv = 0; kv < 2; ++kv) {
             for (int64_t t = 0; t < kernel_seq; ++t) {
                 for (int64_t h = 0; h < heads; ++h) {
-                    for (int64_t d = 0; d < head_dim; ++d) {
-#if USING_ASCEND
-                        const int64_t flat = b * kblk_elems + kv * half_elems + t * heads * head_dim + h * head_dim + d;
-                        EXPECT_EQ(view[b][kv][t][h][d].item<int64_t>(), flat)
-                            << "b=" << b << " kv=" << kv << " t=" << t << " h=" << h;
-#else
-                        const int64_t flat = b * kblk_elems + kv * half_elems + h * kernel_seq * head_dim + t * head_dim + d;
-                        EXPECT_EQ(view[b][kv][h][t][d].item<int64_t>(), flat)
-                            << "b=" << b << " kv=" << kv << " t=" << t << " h=" << h;
-#endif
-                    }
+                    const int64_t flat = b * kblk_elems + kv * half_elems + h * kernel_seq * head_dim + t * head_dim;
+                    EXPECT_EQ(view[b][kv][h][t][0].item<int64_t>(), flat)
+                        << "b=" << b << " kv=" << kv << " t=" << t << " h=" << h;
                 }
             }
         }
@@ -195,6 +191,7 @@ TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
         EXPECT_EQ(view[b][1].min().item<int64_t>(), b * kblk_elems + half_elems);
         EXPECT_EQ(view[b][1].max().item<int64_t>(), (b + 1) * kblk_elems - 1);
     }
+#endif
 }
 
 // ratio == 1 (kernel block == physical block): the kernel-block view must keep
