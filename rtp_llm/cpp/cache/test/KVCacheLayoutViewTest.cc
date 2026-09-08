@@ -125,8 +125,8 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 2);
 }
 
-// PR #1349 review P1 ("MHA 子块视图打乱 K/V 物理布局"): element-level marker
-// verification of the kernel-block view. The MHA memory contract is K/V
+// Element-level marker verification of the kernel-block view. The MHA memory
+// contract is K/V
 // interleaved at KERNEL-block granularity — kernel block b owns a contiguous
 // K half [b*blk, b*blk+half) followed by its V half [b*blk+half, (b+1)*blk)
 // — with cache writers using kernel-granularity slots (see
