@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Parity tests for the pure-torch Ascend RoPE helper.
 
-PR #1349 review P1 ("Ascend attention 错误接受 MRoPE 模型" follow-up): the
+The
 helper's `is_neox_style` flag names the *interleaved* (GPT-J adjacent-pair)
 rotation when True and the NeoX half-split rotation when False -- inverted
 versus RopeConfig.is_neox_style. These tests lock both pairings against

@@ -90,7 +90,7 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
-        # Fail-fast at config time (review P1): Ascend speculative decoding is
+        # Fail-fast at config time: Ascend speculative decoding is
         # not fully migrated (CUDA-only rejection sampling / device-state
         # kernels); MtpExecutor also refuses construction, but failing here
         # gives the clearest message before any engine resource is allocated.
@@ -453,8 +453,8 @@ def start_backend_server(
 
     # Single-rank fast path only when NO accelerator backend is available:
     # on Ascend torch.cuda.is_available() is false, but the NPU multi-rank
-    # path below must stay reachable (review P1: world_size>1 silently
-    # degraded to one rank otherwise).
+    # path below must stay reachable (with a CUDA-only check, world_size>1
+    # would silently degrade to one rank).
     if not torch.cuda.is_available() and not is_ascend():
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
