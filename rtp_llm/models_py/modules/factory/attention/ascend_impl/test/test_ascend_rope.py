@@ -118,5 +118,82 @@ class TestAscendRopeParity(unittest.TestCase):
         self.assertTrue(torch.allclose(q2[0], q2[1], atol=1e-6))
 
 
+def _npu_available() -> bool:
+    try:
+        import torch_npu  # noqa: F401
+        import torch
+
+        return torch.npu.is_available()
+    except Exception:
+        return False
+
+
+def ref_mrope_half(x: torch.Tensor, cache: torch.Tensor, pos: torch.Tensor, sections) -> torch.Tensor:
+    """Reference MRoPE (HF Qwen2-VL / vLLM triton_mrope semantics): global NeoX
+    half-split pairing (d, d + rope_dim/2); frequency f takes its position from
+    the axis owning f's section (sections in dimension-pair units)."""
+    rope_dim = cache.shape[-1]
+    half = rope_dim // 2
+    t_end = sections[0]
+    h_end = t_end + sections[1]
+    out = x.clone()
+    for f in range(half):
+        s = 0 if f < t_end else (1 if f < h_end else 2)
+        idx = pos[:, s].long()
+        cos = cache[idx, f].unsqueeze(1)
+        sin = cache[idx, half + f].unsqueeze(1)
+        u, v = x[..., f], x[..., f + half]
+        out[..., f] = u * cos - v * sin
+        out[..., f + half] = u * sin + v * cos
+    return out
+
+
+@unittest.skipIf(not _npu_available(), "npu_mrope parity requires an NPU device")
+class TestAscendMRopeParity(unittest.TestCase):
+    """Parity between torch_npu.npu_mrope and the pure-torch MRoPE reference.
+
+    Contract locked on CANN 9.0 (see AscendRotaryEmbeddingOp): positions
+    (3, T) int64, q/k 2-D, halves [cos|sin] cache, global half-split pairing,
+    sections in dimension-pair units summing to rotary_dim/2.
+    """
+
+    def test_npu_mrope_matches_reference(self):
+        import torch_npu
+
+        torch.manual_seed(114514)
+        dev = "npu:0"
+        max_pos, tokens, q_heads, kv_heads, head_size = 128, 6, 4, 2, 128
+        sections = [16, 24, 24]  # pair units; sum == head_size / 2
+
+        inv = 1.0 / (10000.0 ** (torch.arange(0, head_size, 2).float() / head_size))
+        freqs = torch.outer(torch.arange(max_pos).float(), inv)
+        cache = torch.cat([freqs.cos(), freqs.sin()], -1)
+        pos = torch.randint(0, max_pos, (tokens, 3), dtype=torch.int64)
+
+        for dtype in (torch.float32, torch.float16):
+            with self.subTest(dtype=dtype):
+                cache_d = cache.to(dev, dtype)
+                q = torch.randn(tokens, q_heads, head_size, device=dev).to(dtype)
+                k = torch.randn(tokens, kv_heads, head_size, device=dev).to(dtype)
+                q_out, k_out = torch_npu.npu_mrope(
+                    pos.t().contiguous().to(dev),
+                    q.reshape(tokens, -1),
+                    k.reshape(tokens, -1),
+                    cache_d,
+                    head_size,
+                    mrope_section=sections,
+                    rotary_mode="half",
+                    cache_mode="default",
+                )
+                # fp16 rounding at |x|~4 is ~2e-3, so the tolerance scales by dtype.
+                atol = 1e-4 if dtype == torch.float32 else 1e-2
+                self.assertTrue(
+                    torch.allclose(q_out.reshape(q.shape).float().cpu(), ref_mrope_half(q.float().cpu(), cache, pos, sections), atol=atol)
+                )
+                self.assertTrue(
+                    torch.allclose(k_out.reshape(k.shape).float().cpu(), ref_mrope_half(k.float().cpu(), cache, pos, sections), atol=atol)
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
