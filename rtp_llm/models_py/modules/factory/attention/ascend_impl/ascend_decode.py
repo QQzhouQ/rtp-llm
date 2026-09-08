@@ -100,12 +100,15 @@ class AscendDecodeImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
-        # MRoPE is rejected: position construction below emits 1-D indices and
-        # never reads combo_position_ids, so multi-axis models would silently
-        # get wrong position ids (mirrors the CUDA impl's Mrope guard).
+        # Non-interleaved MRoPE is supported via torch_npu.npu_mrope
+        # (three-axis t/h/w positions from combo_position_ids; same op as
+        # vllm-ascend). Interleaved MRoPE needs a different cache layout and
+        # stays rejected until verified.
+        mrope_ok = (attn_configs.rope_config.style != RopeStyle.Mrope
+                    or not attn_configs.rope_config.mrope_interleaved)
         return not attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
-               attn_configs.rope_config.style != RopeStyle.Mrope and \
+               mrope_ok and \
                torch.npu.is_available()
 
 
