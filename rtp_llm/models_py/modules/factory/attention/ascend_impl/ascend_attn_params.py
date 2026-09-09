@@ -81,8 +81,7 @@ def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
               pass it; 0/None falls back to the historical 128 default.
 
     Returns:
-        positions: [num_tokens] int32/int64, or [num_tokens, 3] int64 for
-              MRoPE models (three-axis t/h/w ids from combo_position_ids)
+        positions: [num_tokens] int32, CPU
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
@@ -110,35 +109,23 @@ def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
                 batch_ids_list.append(i)
                 pos_list.append(prefix + j)
 
-        seq_positions = torch.tensor(pos_list, dtype=torch.int32)
+        positions = torch.tensor(pos_list, dtype=torch.int32)
         batch_ids = torch.tensor(batch_ids_list, dtype=torch.int32)
     else:
-        seq_positions = attn_inputs.sequence_lengths.cpu().clone()
-        batch_ids = torch.arange(len(seq_positions), dtype=torch.int32)
+        positions = attn_inputs.sequence_lengths.cpu().clone()
+        batch_ids = torch.arange(len(positions), dtype=torch.int32)
 
-    # KV-cache slot assignment is driven by the token's slot in the sequence
-    # (prefix + token index), independent of the RoPE position semantics.
     if (block_table is not None and block_table.numel() > 0
-            and seq_positions.numel() > 0):
+            and positions.numel() > 0):
         max_blocks = block_table.shape[1]
-        block_index = seq_positions // page_size
+        block_index = positions // page_size
         if max_blocks > 0:
             block_index = block_index.clamp(max=max_blocks - 1)
-        block_offset = seq_positions % page_size
+        block_offset = positions % page_size
         slot_block_numbers = block_table[batch_ids, block_index]
         slot_block_numbers = slot_block_numbers.clamp(min=0)  # replace -1 with 0
         slot_mapping = (slot_block_numbers * page_size + block_offset).to(torch.int64)
     else:
         slot_mapping = torch.empty(0, dtype=torch.int64)
-
-    # RoPE positions: 1-D sequence positions by default. For MRoPE models the
-    # upstream PositionIdsGenerator produces per-token three-axis (t/h/w) ids
-    # in combo_position_ids ([num_tokens, 3]); use them verbatim so the
-    # npu_mrope path (AscendRotaryEmbeddingOp) receives the multi-axis input.
-    combo_position_ids = getattr(attn_inputs, "combo_position_ids", None)
-    if combo_position_ids is not None and combo_position_ids.dim() == 2:
-        positions = combo_position_ids.to(torch.int64)
-    else:
-        positions = seq_positions
 
     return positions, slot_mapping
