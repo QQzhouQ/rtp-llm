@@ -533,13 +533,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 
 namespace speculative {
 
-// Platform gate for speculative decoding (MTP/EAGLE/DSpark). Ascend support is
-// NOT fully migrated yet: rejection sampling (SpeculativeSampler kernels),
-// several torch::kCUDA allocations and is_cuda()-only device-state paths in
-// this executor have no NPU implementation. Until the migration lands, the
-// executor refuses construction on Ascend instead of failing (or silently
-// corrupting) at the first decode step. Flip this to false-on-ascend removal
-// once all device paths are ported; MtpExecutorTest locks the contract.
+// Ascend MTP/EAGLE/DSpark is not fully migrated (rejection sampling and
+// device-state paths are CUDA-only); refuse construction until then.
 bool mtpExecutorPlatformUnsupported() {
 #if USING_ASCEND
     return true;
@@ -566,11 +561,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
 #if USING_ASCEND
-    // Ascend async runners execute on a worker thread over the default NPU
-    // stream. The stream must carry a concrete device index: AsyncRunner binds
-    // its worker via cuda_graph::setDevice(stream.device_index()), and an
-    // index-less PrivateUse1 device would leave the thread unbound (or fail
-    // aclrtSetDevice) on multi-card TP.
+    // Ascend runners share the default NPU stream; the stream must carry a
+    // concrete device index for AsyncRunner's setDevice() worker binding.
     collect_metrics_stream_(torch::Stream(c10::Stream::DEFAULT,
                                           torch::Device(torch::kPrivateUse1,
                                                          static_cast<c10::DeviceIndex>(
@@ -600,10 +592,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
 #endif
-    // Fail-fast BEFORE touching any model/cache state: Ascend speculative
-    // decoding is not fully migrated (rejection sampling, kCUDA device-state
-    // paths); without this gate a spec request fails at the first decode step
-    // with an opaque error. See mtpExecutorPlatformUnsupported().
+    // Fail-fast before any model/cache state is touched; see mtpExecutorPlatformUnsupported().
     if (speculative::mtpExecutorPlatformUnsupported()) {
         RTP_LLM_FAIL("speculative decoding (sp_type=%s) is not yet supported on Ascend NPU: "
                      "MTP/EAGLE/DSpark executors still rely on CUDA-only rejection sampling and "

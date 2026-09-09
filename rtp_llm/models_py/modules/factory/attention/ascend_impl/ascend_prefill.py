@@ -26,9 +26,8 @@ class AscendPrefillImpl(FMHAImplBase):
 
         self.fmha_impl = AscendPrefillAttnOp(attn_configs, attn_inputs)
         self.rope_impl = self._create_rope_impl(attn_configs)
-        # Kernel-block granularity for FIA read / scatter write / slot mapping
-        # (PyAttentionInputs.kv_cache is never assigned; the historical
-        # `kv_cache.seq_size_per_block` access was a dead 128 fallback).
+        # FIA read / scatter write / slot mapping all run at kernel-block
+        # granularity (PyAttentionInputs.kv_cache is never assigned).
         self.kernel_page_size = attn_configs.kernel_tokens_per_block or 128
         self.kv_cache_write_op = AscendKVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
@@ -95,9 +94,8 @@ class AscendPrefillImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
-        # MRoPE is rejected: position construction emits 1-D indices and never
-        # reads combo_position_ids, so multi-axis models would silently get
-        # wrong position ids (mirrors the CUDA impl's Mrope guard).
+        # MRoPE rejected: only 1-D positions are built here (same guard as the
+        # CUDA impl); multi-axis support lands with multimodal models.
         return attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
                attn_configs.rope_config.style != RopeStyle.Mrope and \
@@ -122,9 +120,8 @@ class AscendPrefillAttnOp:
         self.num_kv_heads = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.scale = attn_configs.q_scaling * (self.head_dim ** -0.5)
-        # Kernel-block page size: FIA consumes the kernel-granularity block
-        # table and the C++ kv_cache_base view; both are sized by
-        # kernel_seq_size_per_block, not the physical seq_size_per_block.
+        # Kernel-block page size (FIA table and kv_cache_base are sized by
+        # kernel_seq_size_per_block, not the physical seq size).
         self.page_size = attn_configs.kernel_tokens_per_block or 128
         self.block_table = None
         self.actual_seq_q = None

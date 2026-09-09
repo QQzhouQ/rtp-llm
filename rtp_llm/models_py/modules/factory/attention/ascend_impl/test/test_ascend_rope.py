@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """Parity tests for the pure-torch Ascend RoPE helper.
 
-The
-helper's `is_neox_style` flag names the *interleaved* (GPT-J adjacent-pair)
-rotation when True and the NeoX half-split rotation when False -- inverted
-versus RopeConfig.is_neox_style. These tests lock both pairings against
-independent reference implementations, verify the flag actually changes the
-result (guards against re-hardcoding), and pin the halves-[cos|sin] cache
-contract. Pure torch math: runs on CPU, no torch_npu required.
+The helper's `is_neox_style` flag names the *interleaved* (GPT-J) rotation
+when True and the NeoX half-split rotation when False — inverted versus
+RopeConfig.is_neox_style. Locks both pairings against independent references
+and verifies the flag actually changes the result. Pure torch: CPU-runnable.
 """
 
 import unittest
@@ -91,9 +88,8 @@ class TestAscendRopeParity(unittest.TestCase):
         self.assertTrue(torch.allclose(k, ref_rotate(k_ref, cos, sin, interleaved=True), atol=1e-5))
 
     def test_flag_changes_result_and_passthrough_preserved(self):
-        # The flag must actually select the pairing (guards against
-        # re-hardcoding one style), and dims beyond rope_dim must pass through
-        # untouched in both styles.
+        # The flag must actually select the pairing; dims beyond rope_dim pass
+        # through untouched in both styles.
         q0, _ = self._make_qk()
         q_neox, q_ij = q0.clone(), q0.clone()
         apply_rope_pos_ids_nhd(q_neox, q0.clone(), self.cache, self.pos_ids, is_neox_style=False)
@@ -103,9 +99,7 @@ class TestAscendRopeParity(unittest.TestCase):
         self.assertTrue(torch.allclose(q_neox[..., self.rope_dim:], q0[..., self.rope_dim:], atol=0.0))
 
     def test_independent_input_rotation_is_position_correct(self):
-        # Rotation must depend only on each token's own position: identical
-        # input rows under the same pos id rotate to identical outputs, and
-        # the result matches the per-position reference.
+        # Identical input rows under the same pos id rotate identically.
         q2 = torch.randn(1, 1, self.head_dim).repeat(2, 1, 1)  # two identical rows
         pos2 = torch.tensor([7, 7], dtype=torch.int32)
         emb = self.cache[7]

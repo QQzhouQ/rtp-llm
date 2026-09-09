@@ -107,10 +107,7 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     const auto layer  = cache.getLayerCache(0);
     const auto by_tag = cache.getLayerCache(0, "full");
     EXPECT_EQ(layer.seq_size_per_block, 8);
-    // Inner (H, ks) order is platform-specific: Ascend BSND [b, 2, ks, H, D]
-    // vs CUDA BSHD [b, 2, H, ks, D]. With H=1 the shapes coincide, so this
-    // alone cannot catch dim-order regressions — the marker-value tests below
-    // cover the element-level mapping.
+    // Inner (H, ks) order is platform-specific: Ascend BSND vs CUDA BSHD.
 #if USING_ASCEND
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{3, 2, 8, 1, 4}));
 #else
@@ -127,17 +124,9 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 8);
 }
 
-// Element-level marker verification of the kernel-block view. The MHA memory
-// contract is K/V
-// interleaved at KERNEL-block granularity — kernel block b owns a contiguous
-// K half [b*blk, b*blk+half) followed by its V half [b*blk+half, (b+1)*blk)
-// — with cache writers using kernel-granularity slots (see
-// compute_ascend_attn_params). Filling the pool with arange gives every
-// element a unique marker: any mis-mapping (e.g. re-chunking a
-// physical-[K-region][V-region] layout, which would read the next K sub-slice
-// as V when ratio > 1) changes values and fails here. Inner (H, seq) order
-// differs per platform: Ascend BSND [b, 2, ks, H, D] vs CUDA BSHD
-// [b, 2, H, ks, D], hence the #if'd expected strides.
+// Element-level marker verification (arange gives every element a unique
+// value, so any K/V mis-mapping changes values). Inner (H, seq) order differs
+// per platform: Ascend BSND [b, 2, ks, H, D] vs CUDA BSHD [b, 2, H, ks, D].
 TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
     const int64_t physical_blocks = 3;
     const int64_t physical_seq    = 8;
@@ -160,9 +149,7 @@ TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
     torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, {}}}));
 
 #if USING_ASCEND
-    // Current constraint: ratio == 1 only. A subdivided block (ratio > 1) is
-    // rejected at view construction until the kernel-granular write path is
-    // validated end-to-end; lock the fail-fast here.
+    // Constraint: ratio == 1 only on Ascend; lock the fail-fast.
     EXPECT_ANY_THROW((void)cache.getLayerCache(0));
 #else
     const auto layer = cache.getLayerCache(0);
@@ -194,10 +181,8 @@ TEST(KVCacheLayoutViewTest, MhaKernelViewMapsDistinctKvMarkersPerKernelBlock) {
 #endif
 }
 
-// ratio == 1 (kernel block == physical block): the kernel-block view must keep
-// the per-block contiguous [K region][V region] split byte-identical to the
-// physical layout, which is what existing single-granularity (128/128)
-// deployments rely on — locks "no behavior change" for them.
+// ratio == 1: each block's K/V views must equal the contiguous halves of the
+// physical layout — locks zero behavior change for 128/128 deployments.
 TEST(KVCacheLayoutViewTest, MhaKernelViewRatioOneKeepsPerBlockKvHalves) {
     const int64_t physical_blocks = 3;
     const int64_t seq             = 8;  // kernel_seq == physical_seq

@@ -90,10 +90,9 @@ def local_rank_start(
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
         setup_cuda_device_and_accl_env(local_rank)
-        # Fail-fast at config time: Ascend speculative decoding is
-        # not fully migrated (CUDA-only rejection sampling / device-state
-        # kernels); MtpExecutor also refuses construction, but failing here
-        # gives the clearest message before any engine resource is allocated.
+        # Fail-fast at config time: Ascend speculative decoding is not
+        # supported yet (CUDA-only rejection sampling); MtpExecutor also
+        # refuses construction, but failing here is clearest.
         if is_ascend() and py_env_configs.sp_config.type != SpeculativeType.NONE:
             raise RuntimeError(
                 f"Speculative decoding (sp_type={py_env_configs.sp_config.type}) is not yet "
@@ -451,10 +450,8 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    # Single-rank fast path only when NO accelerator backend is available:
-    # on Ascend torch.cuda.is_available() is false, but the NPU multi-rank
-    # path below must stay reachable (with a CUDA-only check, world_size>1
-    # would silently degrade to one rank).
+    # Single-rank fast path only when NO accelerator backend is available;
+    # otherwise the Ascend multi-rank path below must stay reachable.
     if not torch.cuda.is_available() and not is_ascend():
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
