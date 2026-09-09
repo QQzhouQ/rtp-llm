@@ -433,6 +433,15 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
+    # Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
+    # single-card only. Remove when the Ascend TP feature lands.
+    if is_ascend() and py_env_configs.parallelism_config.world_size > 1:
+        raise RuntimeError(
+            f"TP>1 / multi-rank (world_size={py_env_configs.parallelism_config.world_size}) "
+            "is not yet supported on Ascend NPU; "
+            "run single-card (world_size=1) until Ascend TP support lands."
+        )
+
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
     # local_rank_start / ProcessManager install the runtime handlers later.
@@ -456,13 +465,6 @@ def start_backend_server(
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
     pc = py_env_configs.parallelism_config
-    # Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
-    # single-card only. Remove when the Ascend TP feature lands.
-    if is_ascend() and pc.world_size > 1:
-        raise RuntimeError(
-            f"TP>1 / multi-rank (world_size={pc.world_size}) is not yet supported on Ascend NPU; "
-            "run single-card (world_size=1) until Ascend TP support lands."
-        )
     _dev_count = device_count()
     if (
         pc.world_size % _dev_count != 0
