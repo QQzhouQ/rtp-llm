@@ -11,15 +11,9 @@ class AscendRotaryEmbeddingOp:
         self.head_size = attn_config.size_per_head
         self.token_per_block = attn_config.kernel_tokens_per_block
         self.rope_config = attn_config.rope_config
-        # Repo-wide convention (see rope_emb_new.py / deepseek_v2.py):
-        # RopeConfig.is_neox_style=True -> NeoX half-split pairing (default),
-        # False -> GPT-J interleaved (adjacent-pair) pairing. The pure-torch
-        # helper's `is_neox_style` flag names the *interleaved* pairing when
-        # True -- inverted versus RopeConfig -- and it always consumes a
-        # halves [cos|sin] cache (interleave=False below), which is valid for
-        # both pairings. Propagate the config flag through that inversion;
-        # previously this was hardcoded to half-split, silently breaking
-        # interleaved-style models. None-config keeps the historical default.
+        # rope_config.is_neox_style=True means NeoX half-split (repo default),
+        # False means GPT-J interleaved. The helper's flag has inverted naming
+        # (True = interleaved) and always consumes a halves [cos|sin] cache.
         rope_neox = bool(self.rope_config.is_neox_style) if self.rope_config is not None else True
         self.is_interleaved = not rope_neox
         self.cos_sin_cache = cos_sin_cache

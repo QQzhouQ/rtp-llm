@@ -70,24 +70,20 @@ def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
             - input_lengths: [B] int32 (CPU or NPU)
             - sequence_lengths: [B] int32 (CPU or NPU)
             - kv_cache_kernel_block_id: [B, max_kernel_blocks] int32 (CPU) --
-              kernel-granularity table used by FIA; slot_mapping MUST use the
-              same granularity so writes land inside the C++ kv_cache_base
-              view ([kernel_block, 2, kernel_seq, heads, dim], K/V interleaved
-              per kernel block -- see OpDefs.h LayerKVCache contract).
+              kernel-granularity table, same source as FIA; slot_mapping must
+              use this granularity to match the kv_cache_base view.
             - kv_cache_block_id: [B, max_blocks] int32 (CPU, host mirror per main 5466bafd6)
               physical-granularity fallback when no kernel table exists.
-        page_size: kernel seq size per block. Callers that know the cache
-              geometry (e.g. from attn_configs.kernel_tokens_per_block) must
-              pass it; 0/None falls back to the historical 128 default.
+        page_size: kernel seq size per block (e.g. from
+              attn_configs.kernel_tokens_per_block); 0/None falls back to 128.
 
     Returns:
         positions: [num_tokens] int32, CPU
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
-    # Slot mapping must be computed at KERNEL granularity to match the C++
-    # kv_cache_base view and the FIA block table; the physical table is only
-    # a fallback for paths that never produced kernel block ids.
+    # Slots are computed at kernel granularity to match the kv_cache_base view
+    # and the FIA block table; the physical table is only a fallback.
     block_table = _squeeze_block_table(attn_inputs.kv_cache_kernel_block_id)
     if block_table is None:
         block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)

@@ -91,11 +91,8 @@ inline GraphStream toGraphStream(const torch::Stream& stream) {
 
 inline void setDevice(int rank) {
 #if USING_ASCEND
-    // Bind the calling thread to the target NPU so async workers allocate and
-    // execute on the right device (multi-card TP correctness). aclrtSetDevice
-    // requires a concrete index; a negative one (e.g. from a Stream created
-    // with an index-less PrivateUse1 device) must fail loudly instead of
-    // silently running on whatever device the thread inherited.
+    // aclrtSetDevice requires a concrete index; a negative one must fail
+    // loudly instead of running on whatever device the thread inherited.
     RTP_LLM_CHECK_WITH_INFO(rank >= 0, "setDevice(rank=%d) requires a concrete NPU index", rank);
     aclError err = aclrtSetDevice(rank);
     RTP_LLM_CHECK_WITH_INFO(err == ACL_SUCCESS,
@@ -155,10 +152,8 @@ inline torch::Event makeGraphEvent() {
 }
 
 // Event/stream ordering helpers. Ascend's GraphStream is an opaque handle, so
-// record/block fall back to the *current* NPU stream: the event still carries
-// a real c10_npu stream (torch_npu implements the PrivateUse1 EventImpl, same
-// pattern as ExecOps.cc runtimeCreateEvent), which keeps the consumer-side
-// synchronize() copy-completion contract intact on all platforms.
+// record/block run on the current NPU stream (torch_npu implements the
+// PrivateUse1 EventImpl), keeping synchronize() correct on all platforms.
 inline void graphRecordEvent(torch::Event& event, GraphStream stream) {
 #if USING_ASCEND
     (void)stream;  // opaque handle; record on the current NPU stream instead

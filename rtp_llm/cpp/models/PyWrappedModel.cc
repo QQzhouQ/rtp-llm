@@ -163,9 +163,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
 
-    // Accelerator-resident predicate: must cover CUDA *and* PrivateUse1 (NPU)
-    // so Ascend metadata never falls into the host-only branch below (which
-    // pins memory / treats device pointers as host sources).
+    // Device-resident predicate (CUDA or NPU); must match the pack-side
+    // classification — host-only branches below pin memory.
     auto is_accel = [](const torch::Tensor& t) { return t.is_cuda() || t.is_privateuseone(); };
 
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
@@ -198,21 +197,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
 
 #if !USING_CUDA
-    // Non-CUDA platforms only support the host metadata pipeline (the device
-    // branch below needs the CUDA-only metadata kernel), so lift any
-    // accelerator-resident lengths (CUDA from the MTP device-state fast path,
-    // PrivateUse1 from Ascend) back to host before branching.
+    // Non-CUDA platforms only support the host metadata pipeline, so lift any
+    // device-resident lengths (CUDA or NPU) back to host before branching.
     for (auto* t : {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
         if (t->defined() && (t->is_cuda() || t->is_privateuseone())) {
             *t = normalize_i32(t->cpu());
         }
     }
 #endif
-    // MTP draft-prefill hands in a device prefix_lengths (device-state fast path)
-    // while the rest of the host pipeline stays CPU-resident. Normalize it to
-    // host here so downstream host helpers (padding offset, cu_seqlens) keep
-    // their host-tensor contract; prefix_lengths_device below restores the
-    // device copy for device consumers.
+    // MTP draft-prefill hands in a device prefix_lengths while the rest of
+    // the host pipeline stays CPU-resident; normalize it to host here.
     if (py_attn_inputs.input_lengths.defined() && !is_accel(py_attn_inputs.input_lengths)
         && py_attn_inputs.prefix_lengths.defined() && is_accel(py_attn_inputs.prefix_lengths)) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());

@@ -78,8 +78,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     // PDFUSION fast path, so non-root ranks can allocate matching GPU buffers
     // and tpSync's pack/unpack stays in lockstep.
     uint32_t device_bits = 0;
-    // Unified accelerator predicate (must match the pack/unpack classification
-    // below, which treats PrivateUse1/NPU tensors as device-resident too).
+    // Device-resident predicate (CUDA or NPU); must match the pack/unpack
+    // classification below.
     auto is_accel = [](const torch::Tensor& t) { return t.is_cuda() || t.is_privateuseone(); };
     if (inputs.combo_tokens.defined() && is_accel(inputs.combo_tokens)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;

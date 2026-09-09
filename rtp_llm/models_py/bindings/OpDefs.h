@@ -28,16 +28,12 @@ namespace torch_ext {
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, physical_elements_per_token]
 // MHA layout contract (ratio = seq_size_per_block / kernel_seq_size_per_block,
 // i.e. kernel blocks per physical block): every *kernel block* owns a
-// contiguous K slice followed by its V slice (K/V interleaved per kernel
-// block), NOT a full-K-then-full-V region per physical block. A direct
-// view({physical_blocks * ratio, 2, ...}) over the latter would misread the
-// (s+1)-th K sub-slice as the s-th kernel block's V when ratio > 1. Current
-// constraint: ratio == 1 only (enforced in makeLayerCache on Ascend) — the
-// view is then byte-identical to the physical [K region][V region] layout.
-// Lifting the constraint requires the kernel-granularity cache-write slots
-// (compute_ascend_attn_params) to be validated end-to-end; cache
-// store/restore paths are unaffected either way because they copy whole
-// physical blocks as opaque bytes.
+// contiguous K slice followed by its V slice — NOT a full-K-then-full-V region
+// per physical block (a direct re-chunked view would misread the (s+1)-th K
+// sub-slice as the s-th kernel block's V when ratio > 1). Current constraint:
+// ratio == 1 only (enforced in makeLayerCache on Ascend), where the view is
+// byte-identical to the physical [K region][V region] layout. Store/restore
+// copy whole physical blocks as opaque bytes and are layout-agnostic.
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
@@ -211,12 +207,9 @@ private:
                                     layer_id,
                                     group.tag.c_str());
 #if USING_ASCEND
-            // Current constraint: one kernel block per physical block (ratio == 1),
-            // enforced below. ratio > 1 (block subdivision) additionally requires the
-            // kernel-granular cache-write path to be validated end-to-end; reject it
-            // explicitly instead of serving an unvalidated layout.
-            // With ratio == 1 the BSND view below is byte-identical to the physical
-            // [K region][V region] layout expected by FIA/scatter ops.
+            // Constraint: ratio == 1 (one kernel block per physical block).
+            // Subdivided blocks need the kernel-granular write path validated
+            // end-to-end first; reject instead of serving an unvalidated layout.
             RTP_LLM_CHECK_WITH_INFO(blocks_per_physical == 1,
                                     "MHA kernel block subdivision (seq_size_per_block=%zu, "
                                     "kernel_seq_size_per_block=%zu, ratio=%lld) is not yet supported on Ascend; "
