@@ -1,37 +1,16 @@
 import torch
-import torch_npu
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope import apply_rope_pos_ids_nhd
-from rtp_llm.ops import AttentionConfigs, RopeStyle, get_rope_cache_once
+from rtp_llm.ops import AttentionConfigs, get_rope_cache_once
 
 
 class AscendRotaryEmbeddingOp:
-    """Ascend RoPE using pure PyTorch implementation (replaces flashinfer.rope).
-
-    MRoPE models (Qwen2-VL family) take the torch_npu.npu_mrope path: global
-    NeoX half-split pairing (d, d + rotary_dim/2) with the three-axis
-    (t/h/w) position selected per frequency section. mrope_section semantics
-    verified against a pure-torch reference on CANN 9.0: sections are in
-    dimension-PAIR units, sum == rotary_dim/2, and the cos_sin_cache is the
-    standard halves [cos|sin] layout from get_rope_cache_once(interleave=False).
-    """
+    """Ascend RoPE using pure PyTorch implementation (replaces flashinfer.rope)."""
 
     def __init__(self, attn_config: AttentionConfigs, cos_sin_cache: torch.Tensor | None = None):
         self.head_size = attn_config.size_per_head
         self.token_per_block = attn_config.kernel_tokens_per_block
         self.rope_config = attn_config.rope_config
-        self.rope_style = self.rope_config.style if self.rope_config is not None else None
-        if self.rope_style == RopeStyle.Mrope:
-            # Pair-unit T/H/W frequency sections (Qwen mrope_section=[16,24,24]
-            # style); sum == rotary_dim/2. Interleaved MRoPE needs a different
-            # cache layout and is rejected in support() for now.
-            self.mrope_section = [
-                int(self.rope_config.mrope_dim1),
-                int(self.rope_config.mrope_dim2),
-                int(self.rope_config.mrope_dim3),
-            ]
-        else:
-            self.mrope_section = None
         # Repo-wide convention (see rope_emb_new.py / deepseek_v2.py):
         # RopeConfig.is_neox_style=True -> NeoX half-split pairing (default),
         # False -> GPT-J interleaved (adjacent-pair) pairing. The pure-torch
@@ -75,42 +54,18 @@ class AscendRotaryEmbeddingOp:
         return query, key, value
 
     def _apply_rope(self, query, key, rope_params):
-        if self.cos_sin_cache is None:
-            raise RuntimeError("AscendRotaryEmbeddingOp requires cos_sin_cache")
-        device = rope_params.positions_d.device
-        if self.cos_sin_cache.device != device:
-            self.cos_sin_cache = self.cos_sin_cache.to(device, non_blocking=True)
-
-        if self.mrope_section is not None:
-            positions = rope_params.positions_d
-            if positions.dim() != 2:
-                raise RuntimeError(
-                    f"MRoPE expects [num_tokens, 3] t/h/w positions, got shape {tuple(positions.shape)}; "
-                    "combo_position_ids must be produced upstream (PositionIdsGenerator MROPE style)"
-                )
-            # npu_mrope contract (verified vs pure-torch reference on CANN 9.0):
-            # positions (3, T) int64, q/k 2-D (T, heads*head_size), halves
-            # [cos|sin] cache, global half-split pairing, sections in pair units.
-            pos_t = positions.t().to(torch.int64).contiguous()
-            q2 = query.reshape(query.shape[0], -1)
-            k2 = key.reshape(key.shape[0], -1)
-            q_out, k_out = torch_npu.npu_mrope(
-                pos_t, q2, k2, self.cos_sin_cache,
-                self.head_size,
-                mrope_section=self.mrope_section,
-                rotary_mode="half",
-                cache_mode="default",
+        if self.cos_sin_cache is not None:
+            device = rope_params.positions_d.device
+            if self.cos_sin_cache.device != device:
+                self.cos_sin_cache = self.cos_sin_cache.to(device, non_blocking=True)
+            apply_rope_pos_ids_nhd(
+                query, key,
+                self.cos_sin_cache,
+                rope_params.positions_d,
+                is_neox_style=self.is_interleaved,
             )
-            query.copy_(q_out.view_as(query))
-            key.copy_(k_out.view_as(key))
-            return
-
-        apply_rope_pos_ids_nhd(
-            query, key,
-            self.cos_sin_cache,
-            rope_params.positions_d,
-            is_neox_style=self.is_interleaved,
-        )
+        else:
+            raise RuntimeError("AscendRotaryEmbeddingOp requires cos_sin_cache")
 
     def _prepare_warmup_cache_indices(self, num_tokens, device):
         batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)
