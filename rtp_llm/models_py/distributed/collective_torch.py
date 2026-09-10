@@ -288,18 +288,20 @@ def _register_process_groups_to_cpp():
 
     _is_npu = _npu_runtime()
 
-    def _accel_device() -> torch.device:
-        """Current accelerator device bound to this process (NPU on Ascend, CUDA otherwise)."""
-        if _is_npu:
-            return torch.device("npu", torch.npu.current_device())
-        return torch.device("cuda", torch.cuda.current_device())
+    def _accel_device_id() -> int:
+        """Current accelerator device index (NPU on Ascend, CUDA otherwise)."""
+        return torch.npu.current_device() if _is_npu else torch.cuda.current_device()
 
-    def _ensure_accel(t: torch.Tensor, device: torch.device):
+    def _accel_device(device_id: int) -> torch.device:
+        """Accelerator device of device_id (NPU on Ascend, CUDA otherwise)."""
+        return torch.device("npu" if _is_npu else "cuda", device_id)
+
+    def _ensure_accel(t: torch.Tensor, device_id: int):
         """Move CPU tensor to the accelerator if the comm backend requires it
-        (NCCL/HCCL only accept device tensors). Non-CPU tensors (cuda/npu) pass through."""
+        (NCCL/HCCL only accept device tensors). Same shape as _ensure_cuda."""
         if not t.is_cpu:
             return t, False
-        return t.to(device), True
+        return t.to(_accel_device(device_id)), True
 
     def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
         """Broadcast tensors from root rank to all ranks in the group.
@@ -313,9 +315,9 @@ def _register_process_groups_to_cpp():
         if pg is None or pg.size() < 2:
             return
         global_root = torch.distributed.get_global_rank(pg, root)
-        device = _accel_device()
+        device_id = _accel_device_id()
         for t in tensors:
-            dev_t, was_cpu = _ensure_accel(t, device)
+            dev_t, was_cpu = _ensure_accel(t, device_id)
             torch.distributed.broadcast(dev_t, global_root, group=pg)
             if was_cpu:
                 t.copy_(dev_t)
@@ -347,8 +349,8 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
-        device = _accel_device()
-        dev_t, was_cpu = _ensure_accel(target, device)
+        device_id = _accel_device_id()
+        dev_t, was_cpu = _ensure_accel(target, device_id)
         torch.distributed.all_reduce(
             dev_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
         )
@@ -374,7 +376,8 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
-        device = _accel_device()
+        device_id = _accel_device_id()
+        device = _accel_device(device_id)
         rank = pg.rank()
         world_size = pg.size()
         for i, recv_buf in enumerate(recv_buffers):
@@ -388,7 +391,7 @@ def _register_process_groups_to_cpp():
                 ).contiguous()
             else:
                 send_t = send_buffers[i]
-                send_tensor, _ = _ensure_accel(send_t, device)
+                send_tensor, _ = _ensure_accel(send_t, device_id)
             torch.distributed.all_gather_into_tensor(
                 dev_recv_flat, send_tensor, group=pg
             )
