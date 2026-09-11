@@ -6,8 +6,10 @@
 #include <cstring>
 #include <string>
 #include <c10/core/InferenceMode.h>
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
@@ -170,6 +172,17 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
         return;
     }
 
+#if USING_ASCEND
+    // Fail loudly: the CUDA-only device classification below misroutes NPU
+    // tensors to the CPU branch where std::memcpy touches device pointers.
+    // Needs an aclrtMemcpyAsync-based implementation (D2D/D2H/H2D).
+    RTP_LLM_FAIL("optimizedCopyAsync is unsupported on Ascend: CUDA-only copy path "
+                 "cannot handle NPU tensors (src=%s, dst=%s, size=%zu); "
+                 "an aclrtMemcpyAsync-based implementation is required",
+                 src.device().str().c_str(),
+                 dst.device().str().c_str(),
+                 size);
+#else
     RTP_LLM_PROFILE_SCOPE("optimizedCopyAsync");
 
     void* stream = reinterpret_cast<void*>(cuda_graph::graphGetCurrentStream().stream());
@@ -182,6 +195,7 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     } else {
         cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::H2D, stream);
     }
+#endif
 }
 
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -386,6 +400,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     }
 #endif
+
+    if (!has_tagged_cache) {
+        // The host mirror must be cleared with the device block table. fillParams
+        // walks every graph-batch row and may dereference padding rows when a
+        // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
+        // this reset, a padding row can retain a previous replay's block ID and
+        // route a KV write into a live request's block. Block 0 is reserved and is
+        // therefore the safe destination for padding rows.
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
+    }
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
@@ -1135,7 +1159,36 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
-    graph_instances_[key].graph_.replay();
+    try {
+        retryOnceOnTorchCudaOom(
+            [&]() { graph_instances_[key].graph_.replay(); },
+            [&](const std::exception& exception) {
+                RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
+                                    "target_verify=%d error=%s",
+                                    key,
+                                    is_prefill_cuda_graph_mode_ ? "prefill" : "decode",
+                                    is_target_verify_,
+                                    exception.what());
+                if (metrics_reporter_) {
+                    metrics_reporter_->report(
+                        1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+                }
+                cuda_graph::graphEmptyCache();
+            });
+    } catch (const std::exception& exception) {
+        (void)exception;
+#if USING_ROCM
+        if (isTorchCudaOom(exception)) {
+            RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, allocator cache recovery is unavailable on ROCm; "
+                                "not retrying: key=%d mode=%s target_verify=%d error=%s",
+                                key,
+                                is_prefill_cuda_graph_mode_ ? "prefill" : "decode",
+                                is_target_verify_,
+                                exception.what());
+        }
+#endif
+        throw;
+    }
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
