@@ -332,8 +332,12 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         if (std::any_of(params.temperature.data_ptr<float>(),
                         params.temperature.data_ptr<float>() + batch_size,
                         [](auto t) { return t != 1.0f; })) {
-            auto temperature_npu = params.temperature.to(device_type).reshape({(int64_t)batch_size, 1});
-            params.logits.div_(temperature_npu);
+            // temperature == 0 requests greedy decoding but do_sample stays true:
+            // dividing by zero yields inf/NaN and breaks argmax. Treat
+            // non-positive temperatures as 1.0 (no scaling, pure greedy).
+            auto temperature_npu = params.temperature.to(device_type);
+            temperature_npu.masked_fill_(temperature_npu <= 0.0f, 1.0f);
+            params.logits.div_(temperature_npu.reshape({(int64_t)batch_size, 1}));
         }
     }
 
@@ -421,6 +425,14 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             }
         }
         auto selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
+        // Upstream review P1: a mixed batch must honour per-request do_sample.
+        // Rows with do_sample=false are greedy: overwrite their multinomial
+        // draw with the argmax result instead of sampling every request.
+        if (has_not_do_sample) {
+            auto greedy_sel   = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            auto do_sample_npu = params.do_sample.value().to(device_type);
+            selected          = torch::where(do_sample_npu, selected, greedy_sel);
+        }
         samples_t.copy_(selected);
     }
 
@@ -431,9 +443,12 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // ---- 7. Update cum_log_probs ----
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        // Use log_softmax on the pre-filtered logits for numerical stability
-        auto log_probs       = torch::log_softmax(params.logits, -1);
-        auto token_log_probs = log_probs.gather(-1, samples_t.reshape({(int64_t)batch_size, 1})).squeeze(-1);
+        // Upstream review P1: params.logits was overwritten with softmax probs
+        // in step 4, so log_softmax(logits) double-softmaxes and yields wrong
+        // values. Take the probability of the selected token directly from
+        // probs_t and take its log instead.
+        auto token_probs     = probs_t.gather(-1, samples_t.reshape({(int64_t)batch_size, 1})).squeeze(-1);
+        auto token_log_probs = token_probs.clamp_min(1e-10f).log();
         cum_log_probs_t.add_(token_log_probs.to(cum_log_probs_t.device()));
     }
 
@@ -555,7 +570,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     // 3. Fast path for topk = 1
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>()  // signed: -1 sentinel = no top-k;
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
         && !params.output_all_probs.has_value()) {
         torch::Tensor samples_t =
