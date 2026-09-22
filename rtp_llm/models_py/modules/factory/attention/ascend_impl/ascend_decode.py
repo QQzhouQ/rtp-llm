@@ -3,7 +3,9 @@ import torch_npu
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params import (
     AscendAttnParams,
+    _blocks_per_phys_from_config,
     compute_ascend_attn_params,
+    split_kv_kernel_blocks,
 )
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_kv_cache_write_op import AscendKVCacheWriteOp
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope_emb import AscendRotaryEmbeddingOp
@@ -11,11 +13,15 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.models_py.modules.factory.attention import common
 
 
+
+
 class AscendDecodeImpl(FMHAImplBase):
     """Ascend MHA Decode using FIA v2.
 
     Eager: FIA v2 + .reshape() (contiguous copy).
     Graph: FIA v2 + graph_task_group + graph_task_update (vllm-ascend pattern).
+    Hybrid KV cache (Qwen3.5): per-layer views are at kernel-block granularity;
+    slot_mapping addresses the physical storage (blocks_per_phys > 1).
     """
 
     def __init__(self, attn_configs, attn_inputs, parallelism_config):
@@ -61,33 +67,45 @@ class AscendDecodeImpl(FMHAImplBase):
         value = v.reshape(v.shape[0], num_kv_heads, head_dim).contiguous()
         return query, key, value
 
-    def _update_rope_kv_write_params(self, device):
+    def _update_rope_kv_write_params(self, device, kv_cache, layer_idx: int = 0):
+        # The kernel block granularity comes from the cache config; the
+        # physical block size it maps onto drives slot_mapping and the writes.
+        blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, self.attn_inputs)
+        kernel_page = kv_cache.seq_size_per_block if kv_cache is not None else 0
+        self.params.blocks_per_phys = blocks_per_phys
+        self.fmha_impl.blocks_per_phys = blocks_per_phys
         if getattr(self.attn_inputs, "is_cuda_graph", False):
-            self._update_rope_kv_write_params_device(device)
+            self._update_rope_kv_write_params_device(device, kernel_page, blocks_per_phys)
             return
-        positions, slot_mapping = compute_ascend_attn_params(self.attn_inputs)
+        positions, slot_mapping = compute_ascend_attn_params(
+            self.attn_inputs, layer_idx, kernel_page * blocks_per_phys
+        )
         self.params.positions_d = positions.to(device, non_blocking=True)
         self.params.slot_mapping = slot_mapping.to(device, non_blocking=True)
 
-    def _update_rope_kv_write_params_device(self, device):
+    def _update_rope_kv_write_params_device(self, device, kernel_page, blocks_per_phys):
         seq_lens_plus_1 = self.attn_inputs.sequence_lengths_plus_1_d
         positions_d = seq_lens_plus_1 - 1
 
         block_table = self.attn_inputs.kv_cache_kernel_block_id_device
-        page_size = (self.attn_inputs.kv_cache.seq_size_per_block
-                     if self.attn_inputs.kv_cache is not None else 128)
+        if not kernel_page:
+            kernel_page = (self.attn_inputs.kv_cache.seq_size_per_block
+                           if self.attn_inputs.kv_cache is not None else 128)
+        # slot_mapping indexes the physical storage: kernel_block = phys*bpk+o
+        phys_page = kernel_page * max(1, blocks_per_phys)
         if block_table is not None and block_table.numel() > 0 and positions_d.numel() > 0:
             if block_table.ndim != 2:
                 block_table = block_table.reshape(-1, block_table.shape[-1])
             max_blocks = block_table.size(1)
             pos_long = positions_d.long()
-            block_index = (pos_long // page_size).clamp(max=max_blocks - 1)
-            block_offset = pos_long % page_size
+            block_index = (pos_long // kernel_page).clamp(max=max_blocks - 1)
             slot_block_numbers = torch.gather(
                 block_table, 1,
                 block_index.unsqueeze(1).to(block_table.dtype)
             ).squeeze(1).long().clamp(min=0)
-            slot_mapping = (slot_block_numbers * page_size + block_offset).to(torch.int64)
+            phys_block_numbers = slot_block_numbers // max(1, blocks_per_phys)
+            phys_offset = pos_long % phys_page
+            slot_mapping = (phys_block_numbers * phys_page + phys_offset).to(torch.int64)
         else:
             slot_mapping = torch.empty(0, dtype=torch.int64, device=device)
 
@@ -98,20 +116,37 @@ class AscendDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare(attn_inputs)
         self.attn_inputs = attn_inputs
 
-    def prepare_cuda_graph(self, attn_inputs):
+    def signal_graph_events(self, graph_bs):
+        """Called by AscendGraphRunner before the post-capture sanity replay:
+        release the FIA ExternalEvent wait points once so the check replay
+        does not deadlock (real replays are released by update_graph_fia)."""
+        self.fmha_impl.signal_graph_events(graph_bs)
+
+    def prepare_cuda_graph(self, attn_inputs, graph_bs=None):
         """Called by AscendGraphRunner::prepareInputs() before each replay."""
         self.attn_inputs = attn_inputs
         self.fmha_impl.prepare(attn_inputs)
-        batch_size = attn_inputs.sequence_lengths.size(0)
-        seq_lens = attn_inputs.sequence_lengths[:batch_size]
+        # The capture buffer's sequence_lengths is sized [max_bs]; padded rows
+        # were zeroed by the C++ runner. The FIA graph-task update must carry
+        # exactly as many context lengths as the captured batch size of the
+        # replayed graph instance, otherwise the update is dropped and FIA
+        # keeps the capture-time kvlen (reading garbage context).
+        seq = attn_inputs.sequence_lengths
+        valid = int((seq != 0).sum().item()) if seq.numel() else 0
+        valid = max(valid, 1)
+        if graph_bs is None:
+            graph_bs = valid
+        seq_lens = seq[:valid]
         ctx_list = (seq_lens.to(torch.int32) + 1).tolist()
-        self.fmha_impl.update_graph_fia(ctx_list, batch_size)
+        # pad rows up to the captured graph batch size (ctx=1 is a no-op read)
+        ctx_list = ctx_list[:graph_bs] + [1] * max(0, graph_bs - len(ctx_list))
+        self.fmha_impl.update_graph_fia(ctx_list, graph_bs)
 
     def forward(self, qkv, kv_cache, layer_idx=0):
         is_graph = getattr(self.attn_inputs, "is_cuda_graph", False)
 
         if self.need_rope_kv_cache:
-            self._update_rope_kv_write_params(qkv.device)
+            self._update_rope_kv_write_params(qkv.device, kv_cache, layer_idx)
             if self.rope_impl is not None:
                 query, key, value = self.rope_impl.forward(qkv)
             else:
@@ -144,6 +179,10 @@ class AscendDecodeAttnOp:
     Graph mode uses the vllm-ascend pattern:
     - Capture: graph_task_group_begin/end wraps FIA v2 .out() with pre-computed workspace
     - Replay:  graph_task_update_begin/end updates context_lens dynamically
+
+    Hybrid KV cache: the per-layer view interleaves K and V once a physical
+    block is subdivided into kernel blocks, so K/V are split explicitly and the
+    FIA block_size follows the kernel page of the layer's cache group.
     """
 
     _causal_mask = None
@@ -167,14 +206,22 @@ class AscendDecodeAttnOp:
                          attn_inputs.kv_cache else 128
         self.block_table = None
         self.context_lens = None
+        self.blocks_per_phys = _blocks_per_phys_from_config(attn_configs, attn_inputs)
 
-        self._graph_handles = []
-        self._graph_refs = []
+        # FIA graph tasks grouped by captured batch size: each capture bs
+        # bucket registers its own handles; a replay of one bucket must only
+        # update that bucket's tasks (ctx list length must match the captured
+        # batch size or the update is dropped).
+        self._graph_handles = {}  # bs -> [task handles]
+        self._graph_refs = {}     # bs -> [(q, k, v, table, mask, out, lse, page)]
+        self._graph_events = {}   # bs -> [ExternalEvent] for update/replay ordering
 
     def set_params(self, params):
         self.params = params
 
     def prepare(self, attn_inputs):
+        if self.blocks_per_phys <= 0:
+            self.blocks_per_phys = infer_blocks_per_phys(attn_inputs)
         if getattr(attn_inputs, "is_cuda_graph", False):
             self.block_table = attn_inputs.kv_cache_kernel_block_id_device
             if self.block_table is not None:
@@ -206,10 +253,13 @@ class AscendDecodeAttnOp:
             return self._forward_fia_graph(q, kv_cache, block_table, context_lens)
         return self._forward_fia(q, kv_cache, block_table, context_lens)
 
+    def _split_kv(self, kv_cache):
+        # The per-layer view is at kernel-block granularity, which interleaves
+        # K and V once a physical block is subdivided; split them explicitly.
+        return split_kv_kernel_blocks(kv_cache, self.blocks_per_phys)
+
     def _forward_fia_graph(self, q, kv_cache, block_table, context_lens):
-        kv_base = kv_cache.kv_cache_base
-        k_cache = kv_base[:, 0].reshape(kv_base.shape[0], self.page_size, -1)
-        v_cache = kv_base[:, 1].reshape(kv_base.shape[0], self.page_size, -1)
+        k_cache, v_cache, page_size = self._split_kv(kv_cache)
         batch_size = q.shape[0]
         out = torch.empty(batch_size, self.num_heads, self.head_dim,
                           dtype=q.dtype, device=q.device)
@@ -220,9 +270,9 @@ class AscendDecodeAttnOp:
             AscendDecodeAttnOp._shared_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=q, key=k_cache, value=v_cache,
                 atten_mask=atten_mask, block_table=block_table,
-                input_layout="TND", block_size=self.page_size,
+                input_layout="TND", block_size=page_size,
                 actual_seq_qlen=list(range(1, batch_size + 1)),
-                actual_seq_kvlen=[self.page_size] * batch_size,
+                actual_seq_kvlen=[page_size] * batch_size,
                 num_key_value_heads=self.num_kv_heads,
                 num_query_heads=self.num_heads,
                 softmax_scale=self.scale, sparse_mode=3)
@@ -236,7 +286,7 @@ class AscendDecodeAttnOp:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query=q, key=k_cache, value=v_cache,
                 atten_mask=atten_mask, block_table=block_table,
-                input_layout="TND", block_size=self.page_size,
+                input_layout="TND", block_size=page_size,
                 actual_seq_qlen=actual_seq_q, actual_seq_kvlen=actual_seq_kv,
                 num_key_value_heads=self.num_kv_heads,
                 num_query_heads=self.num_heads,
@@ -244,13 +294,19 @@ class AscendDecodeAttnOp:
             return attn_output
 
         actual_seq_q = list(range(1, batch_size + 1))
-        actual_seq_kv = [self.page_size] * batch_size
+        actual_seq_kv = [page_size] * batch_size
         stream = torch.npu.current_stream()
+        # ExternalEvent: the graph records a wait point before this FIA task;
+        # each replay blocks there (device-side, no host stall) until the
+        # update stream records the event after refreshing ctx_lens.
+        event = torch.npu.ExternalEvent()
+        event.wait(stream)
+        event.reset(stream)
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score_v2.out(
             query=q, key=k_cache, value=v_cache,
             atten_mask=atten_mask, block_table=block_table,
-            input_layout="TND", block_size=self.page_size,
+            input_layout="TND", block_size=page_size,
             actual_seq_qlen=actual_seq_q, actual_seq_kvlen=actual_seq_kv,
             num_key_value_heads=self.num_kv_heads,
             num_query_heads=self.num_heads,
@@ -259,31 +315,48 @@ class AscendDecodeAttnOp:
             workspace=AscendDecodeAttnOp._shared_workspace,
             out=[out, lse])
         handle = torch.npu.graph_task_group_end(stream)
+        # NOTE: no record here — anything issued inside the graph context is
+        # recorded as a graph op. The sanity replay gets its signal from
+        # signal_graph_events() invoked by the C++ runner (outside the graph).
 
-        self._graph_handles.append(handle)
-        self._graph_refs.append((
+        self._graph_handles.setdefault(batch_size, []).append(handle)
+        self._graph_refs.setdefault(batch_size, []).append((
             q, k_cache, v_cache,
             block_table, atten_mask,
-            out, lse))
+            out, lse, page_size))
+        self._graph_events.setdefault(batch_size, []).append(event)
         return out
 
+    def signal_graph_events(self, batch_size):
+        for ev in self._graph_events.get(batch_size, []):
+            ev.record(torch.npu.current_stream())
+
     def update_graph_fia(self, ctx_list, batch_size):
-        if not self._graph_handles:
+        import os as _os
+        handles = self._graph_handles.get(batch_size)
+        if not handles:
             return
+        if _os.environ.get("RTP_LLM_SKIP_FIA_UPDATE"):
+            stream = torch.npu.current_stream()
+            for ev in self._graph_events.get(batch_size, []):
+                ev.record(stream)
+            return
+        events = self._graph_events.get(batch_size, [])
         if AscendDecodeAttnOp._shared_update_stream is None:
             AscendDecodeAttnOp._shared_update_stream = torch.npu.Stream()
         us = AscendDecodeAttnOp._shared_update_stream
         actual_seq_q = list(range(1, batch_size + 1))
+        refs = self._graph_refs.get(batch_size, [])
         with torch.npu.stream(us):
-            for i, handle in enumerate(self._graph_handles):
-                q, k_cache, v_cache, block_table, atten_mask, out, lse = self._graph_refs[i]
+            for i, handle in enumerate(handles):
+                q, k_cache, v_cache, block_table, atten_mask, out, lse, page_size = refs[i]
                 if q is None or k_cache is None or out is None:
                     continue
                 torch.npu.graph_task_update_begin(us, handle)
                 torch_npu.npu_fused_infer_attention_score_v2.out(
                     query=q, key=k_cache, value=v_cache,
                     atten_mask=atten_mask, block_table=block_table,
-                    input_layout="TND", block_size=self.page_size,
+                    input_layout="TND", block_size=page_size,
                     actual_seq_qlen=actual_seq_q, actual_seq_kvlen=ctx_list,
                     num_key_value_heads=self.num_kv_heads,
                     num_query_heads=self.num_heads,
@@ -292,12 +365,13 @@ class AscendDecodeAttnOp:
                     workspace=AscendDecodeAttnOp._shared_workspace,
                     out=[out, lse])
                 torch.npu.graph_task_update_end(us)
-        us.synchronize()
+                events[i].record(us)
+        # No host synchronize: the graph's recorded ExternalEvent wait point
+        # orders the FIA task after this update on-device (vllm-ascend pattern);
+        # replay can be launched immediately from C++ without host stall.
 
     def _forward_fia(self, q, kv_cache, block_table, context_lens):
-        kv_base = kv_cache.kv_cache_base
-        k_cache = kv_base[:, 0].reshape(kv_base.shape[0], self.page_size, -1)
-        v_cache = kv_base[:, 1].reshape(kv_base.shape[0], self.page_size, -1)
+        k_cache, v_cache, page_size = self._split_kv(kv_cache)
         batch_size = q.shape[0]
         actual_seq_q = torch.arange(1, batch_size + 1, dtype=torch.int32, device=q.device)
         actual_seq_kv = context_lens.to(torch.int32)
@@ -307,7 +381,7 @@ class AscendDecodeAttnOp:
         attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query=q, key=k_cache, value=v_cache,
             atten_mask=atten_mask, block_table=block_table,
-            input_layout="TND", block_size=self.page_size,
+            input_layout="TND", block_size=page_size,
             actual_seq_qlen=actual_seq_q, actual_seq_kvlen=actual_seq_kv,
             num_key_value_heads=self.num_kv_heads,
             num_query_heads=self.num_heads,

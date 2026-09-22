@@ -76,6 +76,10 @@ class Qwen3NextBase(BaseModel):
         config.vocab_size = config_json["vocab_size"]
         config.max_seq_len = config_json["max_position_embeddings"]
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
+        # Qwen3.5 ships "dtype" (bf16) inside text_config; without config_dtype
+        # the engine defaults to FP16 and the BF16-only Ascend MoE strategy
+        # rejects the model.
+        config.config_dtype = config_json.get("torch_dtype") or config_json.get("dtype")
 
     @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):

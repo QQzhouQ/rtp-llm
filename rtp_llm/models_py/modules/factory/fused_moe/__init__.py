@@ -33,15 +33,13 @@ __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
 
 device_type = get_device_type()
 
-# Import common strategies
-from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
-    BatchedTritonStrategy,
-)
-
 if device_type == DeviceType.ROCm:
     # ========== ROCm Registry ==========
 
     # MoE strategies
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
+        BatchedTritonStrategy,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy import (
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
@@ -64,12 +62,16 @@ elif device_type == DeviceType.Ascend:
 
     from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
         AscendBf16FallbackStrategy,
+        AscendCannStrategy,
         AscendW8A8MXFP8MoeStrategy,
     )
 
     registry = StrategyRegistry()
-    # W8A8_MXFP8 quantized path (ModelSlim static quantization in this stage)
+    # W8A8_MXFP8 quantized path first (ModelSlim static quantization)
     registry.register(AscendW8A8MXFP8MoeStrategy())
+    # CANN pipeline next (eager); pure-PyTorch fallback covers cuda-graph
+    # deployments where the CANN strategy opts out (enable_cuda_graph).
+    registry.register(AscendCannStrategy())
     registry.register(AscendBf16FallbackStrategy())
     FusedMoeFactory.set_registry(registry)
 
@@ -77,6 +79,9 @@ else:
     # ========== CUDA Registry ==========
 
     # MoE strategies
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
+        BatchedTritonStrategy,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,

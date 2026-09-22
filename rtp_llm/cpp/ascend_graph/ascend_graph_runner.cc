@@ -231,18 +231,21 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
     const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
 
+    // Block tables are seeded with page 1 (a always-valid physical page).
+    // Page 0 is the pad/invalid slot: the Qwen3.5 linear-attention decode ops
+    // reject non-positive state pages during warmup/capture.
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
-        torch::zeros({int(max_bs_), max_blocks}, options_npu_int32_);
+        torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
     inputs.attention_inputs.kv_cache_kernel_block_id_host =
-        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+        torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
     // compute_ascend_attn_params() reads kv_cache_block_id_host (not the kernel
     // variant) to derive slot_mapping. Allocate it alongside the kernel version
     // so the capture warmup forward produces a non-empty slot_mapping instead
     // of crashing npu_scatter_pa_kv_cache with a size mismatch.
     inputs.attention_inputs.kv_cache_block_id_device =
-        torch::zeros({int(max_bs_), max_blocks}, options_npu_int32_);
+        torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
     inputs.attention_inputs.kv_cache_block_id_host =
-        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+        torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
 
     const auto layer_num = kv_cache_layer_to_group_.size();
     if (layer_num > 0) {
@@ -263,9 +266,9 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
         inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.reserve(kv_cache_group_num_);
         for (int g = 0; g < kv_cache_group_num_; ++g) {
             inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.push_back(
-                torch::zeros({int(max_bs_), max_blocks}, options_npu_int32_));
+                torch::ones({int(max_bs_), max_blocks}, options_npu_int32_));
             inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
-                torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory());
+                torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory());
         }
     }
 
@@ -528,6 +531,16 @@ void AscendGraphRunner::replayDecode(int bs) {
 
 void AscendGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("ascend graph replay start check for %s %d", key_type, key);
+    // The captured FIA tasks contain ExternalEvent wait points that are
+    // normally released by update_graph_fia during real replays. This sanity
+    // replay has no update pass, so signal the events once from outside the
+    // graph or the replay deadlocks on the wait point.
+    try {
+        auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+        attn_pyobj.attr("signal_graph_events")(py::int_(key));
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("signal_graph_events failed for %s %d: %s", key_type, key, e.what());
+    }
     replayGraph(key);
     ascend_graph::graphDeviceSynchronize();
     RTP_LLM_LOG_INFO("ascend graph replay end check for %s %d", key_type, key);
@@ -547,6 +560,12 @@ static void copyTensorSlice(const torch::Tensor& src, torch::Tensor& dst) {
     auto s = src;
     while (s.dim() > dst.dim() && s.size(0) == 1) {
         s = s.squeeze(0);
+    }
+    // Hybrid models stack the engine-side block tables as [group, batch, cols].
+    // The captured graph references the per-group buffers (by_group), so the
+    // flat capture tensor only needs the full-attention group (group 0).
+    if (s.dim() > dst.dim() && s.size(0) > 1) {
+        s = s[0];
     }
     if (s.dim() < 2) {
         dst.slice(0, 0, s.size(0)).copy_(s, /*non_blocking=*/true);
@@ -701,7 +720,11 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     // -------- Update attention impl with the freshly-copied inputs --------
     {
         RTP_LLM_PROFILE_SCOPE("ascend_graph.prepareInputs(prepare_cuda_graph)");
-        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs.attention_inputs);
+        // Pass the captured graph batch size: the FIA graph-task update must
+        // carry exactly as many context lengths as the graph instance was
+        // captured with (padded request rows contribute ctx=1).
+        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs.attention_inputs,
+                                              py::int_(state.current_real_graph_bs));
     }
 }
 
