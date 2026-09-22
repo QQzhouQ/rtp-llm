@@ -1,4 +1,4 @@
-"""Ascend operator implementations for Qwen3.5."""
+"""Ascend operator implementations for Qwen3.5 (GDN/MoE kernels)."""
 
 from rtp_llm.models_py.kernels.ascend.block import (
     load_initial_state_from_block_map,
@@ -22,6 +22,9 @@ from rtp_llm.models_py.kernels.ascend.linear_attention import (
     solve_tril,
 )
 from rtp_llm.models_py.kernels.ascend.recurrent import fused_recurrent_gated_delta_rule
+
+# NOTE: w8a8_mx_layout (W8A8_MXFP8 weight & activation FP8 quantization) is
+# imported directly by its consumers (model_loader / quant executors).
 
 __all__ = [
     "CausalConv1dMetadata",
