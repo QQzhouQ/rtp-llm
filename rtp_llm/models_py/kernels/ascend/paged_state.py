@@ -34,7 +34,6 @@ GDN performance notes):
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 
 def decode_state_indices(
@@ -83,28 +82,29 @@ def seed_state_segment(
     When ``read_idx != write_idx`` for a row the segment is copied from the
     read page into the write page (the AscendC operators read and update the
     state in place at the write page); equal indices keep the row unchanged.
-    Only the segment columns of the destination row are rewritten — the
-    sibling segment (ssm vs conv) is preserved.
+    Only this segment's columns are read and written — the sibling segment
+    (ssm vs conv) is never touched.
 
-    Perf notes (measured, Ascend950PR): the full-row gather/where/cat/scatter
-    costs ~0.1 ms per GDN layer and is NOT a decode-step hotspot (profiling
-    attributed the big Slice kernels to the FIA KV-cache write path instead).
-    A narrower segment-column view variant was tried and is 40-60% SLOWER:
-    F.embedding/index_copy_ on the non-contiguous column slice degrades to
-    element-wise copies, so keep the contiguous full-row view.
+    Delegates to ``state_migration.migrate_state_rows`` (ported from PR #52):
+    a triton kernel that skips ``src == dst`` rows entirely, so the common
+    same-page case costs nothing but the index comparison.  Rows that need no
+    migration are turned into self-copies via ``torch.where`` — static shape,
+    aclgraph-capture safe (no nonzero / boolean-mask indexing).  Falls back to
+    an unconditional ``index_copy_`` on CPU / without triton / with
+    ``RTP_LLM_GDN_PRECOPY=0``.
+
+    Previous implementation (full-row F.embedding gather + torch.where +
+    cat rebuild + index_copy_, ~0.1 ms per GDN layer) is superseded; a
+    segment-column-slice variant was also measured 40-60% SLOWER than the
+    full-row version — see the perf notes in paged_row_view.
     """
 
-    row_view, seg_off, seg_len = paged_row_view(seg_view)
-    r64 = read_idx.long()
-    w64 = write_idx.long()
-    row_w = F.embedding(w64, row_view)
-    row_r = F.embedding(r64, row_view)
-    same = (r64 == w64).view(-1, 1)
-    seg = torch.where(same,
-                      row_w[:, seg_off:seg_off + seg_len],
-                      row_r[:, seg_off:seg_off + seg_len])
-    row = torch.cat([row_w[:, :seg_off], seg, row_w[:, seg_off + seg_len:]], dim=1)
-    row_view.index_copy_(0, w64, row)
+    from rtp_llm.models_py.kernels.ascend.state_migration import migrate_state_rows
+
+    same = read_idx == write_idx
+    # no-migration rows become self-copies; the triton kernel skips them
+    src = torch.where(same, write_idx, read_idx)
+    migrate_state_rows(seg_view, src, write_idx)
 
 
 __all__ = ["decode_state_indices", "paged_row_view", "seed_state_segment"]

@@ -49,3 +49,9 @@ py_test(
     srcs = ["test_recurrent.py"],
     deps = _DEPS,
 )
+
+py_test(
+    name = "state_migration_test",
+    srcs = ["test_state_migration.py"],
+    deps = _DEPS,
+)

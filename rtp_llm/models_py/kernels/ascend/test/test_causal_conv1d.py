@@ -76,7 +76,8 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         sys.modules.pop("ascendc_causal_conv1d_test", None)
 
     def test_prefill_layout_kwargs_and_cross_block_cache_scatter(self):
-        # GPU-facing layout is (D, T); the AscendC operator receives (T, D).
+        # GPU-facing layout is (D, T); the AscendC fn entry receives (T, D)
+        # with device-tensor metadata and (batch, state_len, dim) states.
         x = torch.tensor(
             [[10, 20, 30, 40, 50], [11, 21, 31, 41, 51]],
             dtype=torch.float16,
@@ -91,7 +92,7 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         block_map = torch.tensor([[3, 4]], dtype=torch.int32)
         calls = []
 
-        def fake_npu_causal_conv1d(**kwargs):
+        def fake_npu_causal_conv1d_fn(**kwargs):
             calls.append(
                 {
                     key: value.clone() if isinstance(value, torch.Tensor) else value
@@ -102,8 +103,8 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
 
         with mock.patch.object(
             self.module,
-            "_load_npu_causal_conv1d",
-            return_value=fake_npu_causal_conv1d,
+            "_load_npu_causal_conv1d_fn",
+            return_value=fake_npu_causal_conv1d_fn,
         ):
             output = self.module.causal_conv1d_fn(
                 x=x,
@@ -121,16 +122,19 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         call = calls[0]
         self.assertEqual(tuple(call["x"].shape), (5, 2))
         self.assertEqual(tuple(call["weight"].shape), (4, 2))
+        # FLA-NPU states layout: (batch, state_len, dim), gathered from page 3
         self.assertEqual(tuple(call["conv_states"].shape), (1, 3, 2))
         torch.testing.assert_close(
             call["conv_states"][0],
             torch.tensor([[100, 200], [101, 201], [102, 202]], dtype=torch.float32),
         )
-        self.assertEqual(call["query_start_loc"], [0, 5])
-        self.assertEqual(call["initial_state_mode"], [1])
-        self.assertEqual(call["activation_mode"], 1)
-        self.assertEqual(call["run_mode"], 0)
-        self.assertEqual(call["head_num"], 0)
+        # metadata passes as int32 device tensors / str activation
+        self.assertEqual(tuple(call["query_start_loc"].shape), (2,))
+        self.assertEqual(call["query_start_loc"].dtype, torch.int32)
+        self.assertEqual(call["query_start_loc"].tolist(), [0, 5])
+        self.assertEqual(call["has_initial_state"].dtype, torch.int32)
+        self.assertEqual(call["has_initial_state"].tolist(), [1])
+        self.assertEqual(call["activation"], "silu")
         self.assertEqual(output.dtype, x.dtype)
         self.assertEqual(tuple(output.shape), tuple(x.shape))
         torch.testing.assert_close(output, x)

@@ -78,16 +78,19 @@ def _causal_conv1d_update_device(
         block_map, sequence_lengths, seq_size_per_block
     )
     seed_state_segment(conv_state, read_idx, write_idx)
-    # the operator computes its result into the x argument; clone so the
-    # caller's buffer (often a view of a larger transient) is not mutated
-    out = npu_causal_conv1d_update(
-        x=x.to(conv_state.dtype).clone(),
+    # feed the op a dedicated out= buffer: its fallback path copies the result
+    # into the x argument, which would clobber the caller's tensor
+    x_work = x.to(conv_state.dtype)
+    out = torch.empty_like(x_work)
+    npu_causal_conv1d_update(
+        x=x_work,
         conv_state=conv_state,
         weight=weight.t().contiguous(),
         bias=bias,
         activation=_activation_name(activation),
         conv_state_indices=write_idx.to(torch.int32),
         null_block_id=0,
+        out=out,
     )
     out = out.to(original_dtype)
     # caller contract: (batch, dim) in, (batch, dim) out; otherwise
@@ -144,36 +147,71 @@ def prepare_causal_conv1d_metadata(
     return CausalConv1dMetadata(empty, empty, 0)
 
 
-def _gather_prefill_states(
+def _gather_pages_from_block_map(
+    block_map: torch.Tensor,
+    block_indices: torch.Tensor,
+    pad_slot_id: int,
+) -> torch.Tensor:
+    """Device-side page lookup per sequence (equivalent of ``_mapped_page``).
+
+    ``block_map``: (batch, max_blocks) — 3-D group-prefixed tables take
+    group 0.  ``block_indices``: (batch,) logical block index.  Returns
+    (batch,) int32 device pages; out-of-range entries are masked to
+    ``pad_slot_id`` so callers rely on a uniform sentinel.
+    """
+
+    if block_map.dim() == 3:
+        block_map = block_map[0]
+    elif block_map.dim() != 2:
+        raise ValueError(
+            f"block_map must be 2-D or 3-D, got shape {tuple(block_map.shape)}"
+        )
+    block_indices = block_indices.to(block_map.device)
+    max_col = block_map.shape[1]
+    in_range = block_indices < max_col
+    safe_indices = block_indices.clamp(min=0, max=max_col - 1)
+    pages = block_map.gather(1, safe_indices.unsqueeze(1)).squeeze(1)
+    pages = torch.where(
+        in_range & (block_indices >= 0), pages, torch.full_like(pages, pad_slot_id)
+    )
+    return pages.to(torch.int32)
+
+
+def _gather_prefill_states_device(
     x: torch.Tensor,
     conv_states: Optional[torch.Tensor],
-    block_rows: Optional[list[list[int]]],
-    prefix_values: list[int],
+    block_map: Optional[torch.Tensor],
+    prefix_lengths: torch.Tensor,
     seq_size_per_block: int,
     state_len: int,
     pad_slot_id: int,
 ) -> torch.Tensor:
-    """Gather the state ending at each sequence prefix into NPU layout."""
+    """Gather each sequence's prefix-ending state on device.
 
-    batch = len(prefix_values)
-    dim = x.shape[0]
+    Produces the flat (batch, state_len, dim) initial-state buffer the
+    FLA-NPU prefill op requires from the paged (pages, dim, state) view.
+    """
+
+    batch = prefix_lengths.shape[0]
+    dim = x.shape[0]  # x: (dim, total_tokens)
     initial_states = torch.zeros(
         (batch, state_len, dim), dtype=x.dtype, device=x.device
     )
-    if conv_states is None or block_rows is None or state_len == 0:
+    if conv_states is None or block_map is None or state_len == 0:
         return initial_states
 
-    for sequence_index, prefix_length in enumerate(prefix_values):
-        if prefix_length <= 0:
-            continue
-        block_index = (prefix_length - 1) // seq_size_per_block
-        page_index = _mapped_page(block_rows, sequence_index, block_index, pad_slot_id)
-        if page_index == pad_slot_id:
-            continue
-        # RTP-LLM: (page, dim, state); AscendC: (page, state, dim).
-        initial_states[sequence_index].copy_(
-            conv_states[page_index, :, :state_len].transpose(0, 1)
-        )
+    # Prefill is eager-only (the ACL graph runner is decode-only): the
+    # boolean-mask indexing below is not graph-capture safe and must not be
+    # copied into the decode path.
+    prefix_positive = prefix_lengths > 0
+    block_indices = (prefix_lengths - 1).clamp(min=0) // seq_size_per_block
+    page_indices = _gather_pages_from_block_map(block_map, block_indices, pad_slot_id)
+
+    read_mask = prefix_positive & (page_indices != pad_slot_id)
+    valid_pages = page_indices[read_mask].long()
+    # conv_states: (pages, dim, state) in RTP layout; FLA wants (state, dim)
+    gathered = conv_states.index_select(0, valid_pages).transpose(1, 2)
+    initial_states[read_mask] = gathered
     return initial_states
 
 
@@ -192,21 +230,34 @@ def _history_ending_at(
     return torch.cat((initial_state[end:], sequence_x[:end]), dim=0)
 
 
-def _scatter_prefill_states(
+def _scatter_prefill_states_host(
     x: torch.Tensor,
     conv_states: Optional[torch.Tensor],
-    block_rows: Optional[list[list[int]]],
-    query_starts: list[int],
-    prefix_values: list[int],
+    block_map: Optional[torch.Tensor],
+    query_start_loc: torch.Tensor,
+    prefix_lengths: torch.Tensor,
     seq_size_per_block: int,
     initial_states: torch.Tensor,
     state_len: int,
     pad_slot_id: int,
 ) -> None:
-    """Write cache snapshots at every crossed block edge and sequence end."""
+    """Host-side multi-block cache snapshot write-back for prefill.
 
-    if conv_states is None or block_rows is None or state_len == 0:
+    Writes a conv_state snapshot at every crossed block edge and at each
+    sequence end.  Intentionally not graph-safe (``.tolist()`` + Python
+    loops) — prefill is never graph-captured (the ACL graph runner is
+    decode-only).
+    """
+
+    if conv_states is None or block_map is None or state_len == 0:
         return
+
+    query_starts = [int(v) for v in query_start_loc.detach().cpu().tolist()]
+    prefix_values = [int(v) for v in prefix_lengths.detach().cpu().tolist()]
+    block_map_2d = block_map[0] if block_map.dim() == 3 else block_map
+    block_rows = [
+        [int(p) for p in row.detach().cpu().tolist()] for row in block_map_2d
+    ]
 
     for sequence_index, prefix_length in enumerate(prefix_values):
         token_start = query_starts[sequence_index]
@@ -220,15 +271,25 @@ def _scatter_prefill_states(
                 continue
 
             block_index = (absolute_end - 1) // seq_size_per_block
-            page_index = _mapped_page(
-                block_rows, sequence_index, block_index, pad_slot_id
-            )
+            if (
+                block_index >= len(block_rows[sequence_index])
+                or block_index < 0
+            ):
+                continue
+            page_index = block_rows[sequence_index][block_index]
             if page_index == pad_slot_id:
                 continue
+
             history = _history_ending_at(
                 initial_states[sequence_index], sequence_x, local_end
             )
             conv_states[page_index, :, :state_len].copy_(history.transpose(0, 1))
+
+
+def _load_npu_causal_conv1d_fn():
+    from fla_npu.ops.ascendc import npu_causal_conv1d_fn
+
+    return npu_causal_conv1d_fn
 
 
 def causal_conv1d_fn(
@@ -245,7 +306,14 @@ def causal_conv1d_fn(
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
 ):
-    """Run varlen causal convolution and update the paged cache in place."""
+    """Run varlen causal convolution and update the paged cache in place.
+
+    Uses the FLA-NPU ``npu_causal_conv1d_fn`` entry with device-tensor
+    metadata (``query_start_loc`` / ``has_initial_state`` int32); initial
+    states are gathered device-side from the paged cache.  **Eager-only** —
+    the multi-block snapshot write-back keeps a host loop by design (the ACL
+    graph runner is decode-only).  Do not call from a capture region.
+    """
 
     if x.dim() != 2 or weight.dim() != 2:
         raise ValueError("NPU prefill expects x=(dim, tokens), weight=(dim, width)")
@@ -259,54 +327,59 @@ def causal_conv1d_fn(
     if dim != weight_dim:
         raise ValueError("x and weight feature dimensions must match")
 
-    query_starts = _as_int_list(query_start_loc)
-    prefix_values = _as_int_list(prefix_lengths)
-    batch = len(query_starts) - 1
-    if len(prefix_values) != batch:
-        raise ValueError("prefix_lengths must contain one value per sequence")
-    block_rows = _as_int_rows(block_map) if block_map is not None else None
+    batch = query_start_loc.shape[0] - 1
+    if prefix_lengths.shape[0] != batch:
+        raise ValueError(
+            f"prefix_lengths must contain one value per sequence, got "
+            f"{prefix_lengths.shape[0]} vs expected batch={batch}"
+        )
+
     state_len = width - 1
-
-    temporary_states = _gather_prefill_states(
+    initial_states = _gather_prefill_states_device(
         x_work,
         conv_states,
-        block_rows,
-        prefix_values,
+        block_map,
+        prefix_lengths,
         seq_size_per_block,
         state_len,
         pad_slot_id,
     )
-    # The Ascend operator may update its state argument.  Cache scatter needs
-    # the exact history that existed before this call.
-    initial_states = temporary_states.clone()
-    npu_causal_conv1d = _load_npu_causal_conv1d()
-    output = npu_causal_conv1d(
-        # x arrives as (dim, tokens); the operator reads a contiguous
-        # (tokens, dim) buffer, so materialise the transpose instead of
-        # handing it a strided view.
-        x=x_work.transpose(0, 1).contiguous(),
-        weight=weight.transpose(0, 1).contiguous(),
+    has_initial_state = (prefix_lengths > 0).to(torch.int32)
+
+    # FLA-NPU layout: conv_states (batch, state_len, dim); weight (width, dim);
+    # x (tokens, dim).  The op writes the sequence-end state back into the
+    # conv_states buffer in place — pass a copy so the pristine initial
+    # states remain available to the snapshot write-back below.
+    npu_states = initial_states.clone()
+    npu_weight = weight.transpose(0, 1).contiguous()
+    npu_x = x_work.transpose(0, 1).contiguous()
+
+    npu_causal_conv1d_fn = _load_npu_causal_conv1d_fn()
+    output = npu_causal_conv1d_fn(
+        x=npu_x,
+        weight=npu_weight,
         bias=bias,
-        conv_states=temporary_states,
-        query_start_loc=query_starts,
-        initial_state_mode=[int(prefix > 0) for prefix in prefix_values],
-        activation_mode=_activation_mode(activation),
+        conv_states=npu_states,
+        query_start_loc=query_start_loc.to(torch.int32),
+        has_initial_state=has_initial_state,
+        activation=_activation_name(activation),
         pad_slot_id=pad_slot_id,
-        run_mode=0,
-        head_num=0,
+        validate_data=False,  # keep off the D2H path
     )
 
-    _scatter_prefill_states(
-        x_work,
-        conv_states,
-        block_rows,
-        query_starts,
-        prefix_values,
-        seq_size_per_block,
-        initial_states,
-        state_len,
-        pad_slot_id,
-    )
+    if conv_states is not None and block_map is not None and state_len > 0:
+        _scatter_prefill_states_host(
+            x=x_work,
+            conv_states=conv_states,
+            block_map=block_map,
+            query_start_loc=query_start_loc,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=seq_size_per_block,
+            initial_states=initial_states,
+            state_len=state_len,
+            pad_slot_id=pad_slot_id,
+        )
+
     return output.transpose(0, 1).to(original_dtype)
 
 
