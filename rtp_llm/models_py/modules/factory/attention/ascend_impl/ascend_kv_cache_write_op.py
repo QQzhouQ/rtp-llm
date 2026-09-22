@@ -30,15 +30,28 @@ class AscendKVCacheWriteOp:
         if kv_cache is None:
             return
 
-        # slot_mapping addresses tokens as physical_block * physical_seq +
-        # offset, so the scatter targets must be the physical K/V views: the
-        # per-layer kernel-block view interleaves K and V when a physical block
-        # is subdivided.
-        k_view, v_view = split_kv_physical(kv_cache, self.params.blocks_per_phys)
+        # Write through the per-kernel-block 4D views base[:, 0/1], paired
+        # with kernel-flat slots (kb*kernel_page+off) from the graph path.
+        # Reads (FIA) use the same kernel-block halves, so write and read
+        # address identical memory.  The old physical-view pairing relied on
+        # a flat reinterpretation that scrambles K into the V half for
+        # tokens past the kernel-block mid — only "worked" because the reads
+        # materialised the same scrambled mapping.
+        base = kv_cache.kv_cache_base
+        k_view = base[:, 0]
+        v_view = base[:, 1]
 
         slot_mapping = self.params.slot_mapping
         if slot_mapping.dtype not in (torch.int32, torch.int64):
             slot_mapping = slot_mapping.to(torch.int32)
+
+        # Non-contiguous key/value (rope returns transposed views) route the
+        # op through a slow element-wise path; the copies are per-token K/V
+        # heads (KB-scale) and are graph-pool-stable under aclgraph.
+        if not key.is_contiguous():
+            key = key.contiguous()
+        if not value.is_contiguous():
+            value = value.contiguous()
 
         torch_npu.npu_scatter_pa_kv_cache(
             key, value, k_view, v_view, slot_mapping, cache_mode = "Norm"
