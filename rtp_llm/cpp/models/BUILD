@@ -189,9 +189,11 @@ cc_library(
     ] + select({
         "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
         "@//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+        "@//:using_ascend": ["//rtp_llm/cpp/ascend_graph:ascend_graph"],
         "//conditions:default": [],
     }) + [
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
+    ],
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": [

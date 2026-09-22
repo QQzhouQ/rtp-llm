@@ -21,6 +21,9 @@ class AscendAttnParams:
     block_size: int = 128
     scale: float = 1.0
     positions_d: Optional[torch.Tensor] = None  # RoPE position IDs (device tensor)
+    # Kernel blocks per physical block; >1 when the attention kernel needs a
+    # finer block granularity than the allocated KV block.
+    blocks_per_phys: int = 1
 
 
 def _squeeze_block_table(block_table):
@@ -34,11 +37,81 @@ def _squeeze_block_table(block_table):
     return block_table
 
 
+def infer_blocks_per_phys(attn_inputs) -> int:
+    """Kernel blocks per physical block, derived from the two block tables.
+
+    ``attn_inputs.kv_cache`` is not populated on this path, so the physical
+    block size cannot be read directly.  The kernel table is the physical table
+    expanded by that factor, so their widths give the ratio.
+    """
+    phys = attn_inputs.kv_cache_block_id_host
+    kernel = attn_inputs.kv_cache_kernel_block_id_host
+    if phys is None or kernel is None or phys.numel() == 0 or kernel.numel() == 0:
+        return 1
+    phys_cols = int(phys.shape[-1])
+    kernel_cols = int(kernel.shape[-1])
+    if phys_cols <= 0 or kernel_cols % phys_cols != 0:
+        return 1
+    return max(1, kernel_cols // phys_cols)
+
+
+def _physical_kv_view(kv_cache, blocks_per_phys: int):
+    """Return the MHA cache as a physical-block view plus the split factor.
+
+    ``getLayerCache`` hands back
+    ``[kernel_block_num, 2, kernel_seq, num_kv_heads, head_dim]``.  That merged
+    grouping only holds when the kernel block equals the physical block: a
+    physical block stores every K token before every V token, so subdividing it
+    while keeping the ``2`` axis inside makes each kernel block straddle the
+    K/V boundary.  Rebuild the physical view so K and V can be split first.
+    """
+    base = kv_cache.kv_cache_base
+    kernel_page = int(getattr(kv_cache, "seq_size_per_block", 0) or base.shape[2])
+    bpk = max(1, int(blocks_per_phys))
+    if bpk <= 1:
+        return base, 1, kernel_page
+    phys_blocks = base.shape[0] // bpk
+    phys = base.reshape(phys_blocks, 2, kernel_page * bpk, *base.shape[3:])
+    return phys, bpk, kernel_page
+
+
+def split_kv_physical(kv_cache, blocks_per_phys: int):
+    """K/V views at physical-block granularity: [blocks, phys_seq, heads, dim]."""
+    phys, _, _ = _physical_kv_view(kv_cache, blocks_per_phys)
+    return phys[:, 0], phys[:, 1]
+
+
+def split_kv_kernel_blocks(kv_cache, blocks_per_phys: int):
+    """K/V views at kernel-block granularity: [kernel_blocks, kernel_seq, H*D]."""
+    phys, bpk, kernel_page = _physical_kv_view(kv_cache, blocks_per_phys)
+    blocks = phys.shape[0] * bpk
+    k = phys[:, 0].reshape(blocks, kernel_page, -1)
+    v = phys[:, 1].reshape(blocks, kernel_page, -1)
+    return k, v, kernel_page
+
+
+def _blocks_per_phys_from_config(attn_configs, attn_inputs) -> int:
+    """Kernel blocks per physical block.
+
+    Prefer the real cache configuration (tokens_per_block / kernel tokens per
+    block): during aclgraph capture the C++ runner allocates the kernel and
+    physical block tables with identical widths, so inferring the ratio from
+    the table shapes returns 1 and silently breaks the KV slot mapping for
+    subdivided blocks (bpk > 1). Table-width inference remains only as a
+    fallback for configs without kernel block info.
+    """
+    tpb = getattr(attn_configs, "tokens_per_block", 0) or 0
+    ktpb = getattr(attn_configs, "kernel_tokens_per_block", 0) or 0
+    if tpb > 0 and ktpb > 0 and tpb % ktpb == 0:
+        return tpb // ktpb
+    return infer_blocks_per_phys(attn_inputs)
+
+
 def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     """Build AscendAttnParams from PyAttentionInputs."""
     params = AscendAttnParams()
 
-    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)
+    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)
 
     if attn_inputs.sequence_lengths.numel() > 0:
         params.seq_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
@@ -56,7 +129,7 @@ def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     return params
 
 
-def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
+def compute_ascend_attn_params(attn_inputs, layer_idx: int = 0, phys_page_size: int = 0):
     """Compute RoPE positions and KV cache slot_mapping in pure Python.
 
     Replaces C++ FlashInferMlaAttnParams.fill_params() on Ascend platform.
@@ -69,28 +142,28 @@ def compute_ascend_attn_params(attn_inputs, page_size: Optional[int] = None):
             - prefix_lengths: [B] int32 (CPU or NPU)
             - input_lengths: [B] int32 (CPU or NPU)
             - sequence_lengths: [B] int32 (CPU or NPU)
-            - kv_cache_kernel_block_id: [B, max_kernel_blocks] int32 (CPU) --
-              kernel-granularity table, same source as FIA; slot_mapping must
-              use this granularity to match the kv_cache_base view.
-            - kv_cache_block_id: [B, max_blocks] int32 (CPU, host mirror per main 5466bafd6)
-              physical-granularity fallback when no kernel table exists.
-        page_size: kernel seq size per block (e.g. from
-              attn_configs.kernel_tokens_per_block); 0/None falls back to 128.
+            - kv_cache_block_id_host: [B, max_blocks] int32 (CPU)
+            - kv_cache: object with seq_size_per_block
 
     Returns:
         positions: [num_tokens] int32, CPU
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
-    # Slots are computed at kernel granularity to match the kv_cache_base view
-    # and the FIA block table; the physical table is only a fallback.
-    block_table = _squeeze_block_table(attn_inputs.kv_cache_kernel_block_id)
-    if block_table is None:
-        block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)
-    if block_table is not None and block_table.device.type != "cpu":
-        block_table = block_table.cpu()  # kernel table may arrive device-resident
-    if not page_size:
-        page_size = 128
+    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)  # always on CPU
+    # Hybrid models (e.g. Qwen3.5) carry one physical block table per cache
+    # group, stacked as [group, batch, max_blocks]; select this layer's group.
+    if block_table is not None and block_table.dim() == 3:
+        gid = 0
+        if attn_inputs.kv_cache_layer_to_group is not None:
+            gid = int(attn_inputs.kv_cache_layer_to_group[layer_idx].item())
+        block_table = block_table[gid]
+    # slot_mapping indexes the physical block storage, so it must use the
+    # physical block size.  attn_inputs.kv_cache is not populated here, hence
+    # the caller passes the size it derived from the block tables.
+    page_size = int(phys_page_size) if phys_page_size else (
+        attn_inputs.kv_cache.seq_size_per_block
+        if attn_inputs.kv_cache is not None else 128)
 
     if is_prefill:
         prefix_lens = attn_inputs.prefix_lengths.cpu() if attn_inputs.prefix_lengths is not None else None
