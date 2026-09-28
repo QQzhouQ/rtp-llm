@@ -1,0 +1,1 @@
+/home/d30033799/.cache/bazel/_bazel_root/670a64caac160e416071da46bb955f07/execroot/rtp_llm/bazel-out/k8-opt/bin/rtp_llm/dash_sc/proto/model_config_pb2_grpc.py

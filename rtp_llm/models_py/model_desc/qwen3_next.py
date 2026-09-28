@@ -208,7 +208,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             bias=None,
             conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_d,
             metadata=metadata,
@@ -246,7 +246,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_d,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.kv_cache_block_id_device,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -280,7 +280,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 final_state,
                 attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.kv_cache_block_id_device,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -351,7 +351,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             self.conv_weights,
             bias=None,
             activation="silu",
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
@@ -405,7 +405,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=attn_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
@@ -631,7 +631,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             bias=None,
             conv_states=conv_states,
             query_start_loc=full_cu,
-            block_map=attention_inputs.kv_cache_kernel_block_id_device,
+            block_map=attention_inputs.kv_cache_block_id_device,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attention_inputs.prefix_lengths_d,
             metadata=full_conv_meta,
@@ -656,7 +656,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
             load_initial_state_from_block_map(
                 attention_inputs.prefix_lengths_d,
-                attention_inputs.kv_cache_kernel_block_id_device,
+                attention_inputs.kv_cache_block_id_device,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -693,7 +693,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 final_state,
                 attention_inputs.prefix_lengths_d,
                 full_cu,
-                attention_inputs.kv_cache_kernel_block_id_device,
+                attention_inputs.kv_cache_block_id_device,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -966,6 +966,19 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        import os as _os_dbg
+        if (_os_dbg.environ.get("RTP_LLM_PREFILL_DBG", "") not in ("", "0")
+                and attention_inputs.is_prefill
+                and attention_inputs.input_lengths.shape[0] > 1):
+            import logging as _lg
+            _lg.getLogger("prefill_dbg").info(
+                "[PREFILL-DBG] batch=%d input_lengths=%s prefix=%s cu_seqlens=%s bt_group0_row0=%s",
+                attention_inputs.input_lengths.shape[0],
+                attention_inputs.input_lengths[:8].tolist(),
+                attention_inputs.prefix_lengths[:8].tolist() if attention_inputs.prefix_lengths.numel() else [],
+                attention_inputs.cu_seqlens[:9].tolist() if attention_inputs.cu_seqlens.numel() else [],
+                attention_inputs.kv_cache_block_id_host[0][:4].tolist() if attention_inputs.kv_cache_block_id_host is not None and attention_inputs.kv_cache_block_id_host.numel() else [],
+            )
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()

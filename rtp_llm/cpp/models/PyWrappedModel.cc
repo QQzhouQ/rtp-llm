@@ -219,6 +219,31 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
     py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
     py_attn_inputs.kv_cache_kernel_block_id_host   = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
+
+    // Physical block tables, also per-group when hybrid ([group, batch, blocks]).
+    // GDN state addressing consumes these (page id == row of the layer buffer);
+    // kernel table values are kernel block ids (phys * bpk + half) and must
+    // not be used as state page indices. For non-hybrid (2-D) tables, expose
+    // the whole table as a single group so the model layer sees a uniform
+    // per-group interface.
+    if (inputs.kv_cache_block_id.defined()) {
+        py_attn_inputs.kv_cache_block_id_host_by_group.clear();
+        py_attn_inputs.kv_cache_block_id_device_by_group.clear();
+        if (inputs.kv_cache_block_id.dim() == 3) {
+            const size_t phys_group = inputs.kv_cache_block_id.size(0);
+            py_attn_inputs.kv_cache_block_id_host_by_group.reserve(phys_group);
+            py_attn_inputs.kv_cache_block_id_device_by_group.reserve(phys_group);
+            for (size_t g = 0; g < phys_group; ++g) {
+                auto phys_view = inputs.kv_cache_block_id[g];
+                py_attn_inputs.kv_cache_block_id_host_by_group.push_back(phys_view);
+                py_attn_inputs.kv_cache_block_id_device_by_group.push_back(tensorHoldHostAndToCuda(phys_view));
+            }
+        } else {
+            py_attn_inputs.kv_cache_block_id_host_by_group.push_back(inputs.kv_cache_block_id);
+            py_attn_inputs.kv_cache_block_id_device_by_group.push_back(
+                tensorHoldHostAndToCuda(inputs.kv_cache_block_id));
+        }
+    }
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
@@ -490,7 +515,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+        if (enable_cuda_graph_ && graph_runner_ != nullptr
+            && graph_runner_->canRun(py_model_inputs, graph_state)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");

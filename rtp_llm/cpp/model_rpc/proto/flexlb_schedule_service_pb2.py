@@ -1,0 +1,1 @@
+/home/d30033799/weishan/rtp-llm/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service_pb2.py

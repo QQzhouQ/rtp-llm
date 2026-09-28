@@ -255,6 +255,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_LOG_WARNING(
                 "Ascend ACL Graph does not support prefill cuda graph mode; "
                 "graph_runner_ will not be created, falling back to eager forward.");
+        } else if (params.sp_config.type != SP_TYPE_NONE && params.model_id) {
+            // MTP draft model on Ascend stays eager: Phase-1 profiling shows
+            // the draft forwards are <5% of the MTP round — not worth graph
+            // complexity yet.
+            RTP_LLM_LOG_WARNING(
+                "Ascend ACL Graph is disabled for the MTP draft model; draft runs eager.");
         } else {
             c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
             GraphParams      graph_params;
@@ -276,12 +282,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
             }
 
+            // Decision table aligned with the CUDA branch above:
+            //   target-verify graph (model_id == 0, sp on): num_tokens = gen + 1
+            //   MTP draft decode graph (model_id != 0, sp on): unreachable
+            //   (guarded), draft stays eager
+            //   normal decode graph (sp off): 1 token per stream
             graph_params.is_target_verify = use_spec_decoding;
-            if (params.sp_config.type != SP_TYPE_NONE) {
-                graph_params.sp_steps           = params.sp_config.gen_num_per_cycle;
-                graph_params.num_tokens_per_bs  = params.sp_config.gen_num_per_cycle + 1;
+            if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+                && !params.model_id) {
+                graph_params.sp_steps          = params.sp_config.gen_num_per_cycle;
+                graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
             } else {
-                graph_params.num_tokens_per_bs  = 1;
+                graph_params.num_tokens_per_bs = 1;
             }
 
             graph_runner_ = new AscendGraphRunner(graph_params, py_instance);

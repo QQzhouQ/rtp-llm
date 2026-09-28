@@ -98,6 +98,69 @@ def _causal_conv1d_update_device(
     return out if squeeze_token_axis else out.unsqueeze(-1)
 
 
+def _causal_conv1d_update_multi_device(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    activation: Union[bool, str, None],
+    block_map: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    seq_size_per_block: int,
+    original_dtype: torch.dtype,
+    squeeze_token_axis: bool,
+) -> torch.Tensor:
+    """Multi-token (target-verify, T = k + 1 <= 8) conv update with fully
+    device-side metadata — aclgraph-capturable.
+
+    Per token: migrate the conv segment from the previous state page into
+    the token's write page (same triton page-row migration as the T==1
+    path), then run the in-place ``npu_causal_conv1d_update`` AscendC
+    operator with the device-gathered page index.  The sliding-window
+    history is carried by the page seed, so the kernel's own
+    initial-state semantics are not needed here.
+    """
+
+    from rtp_llm.models_py.kernels.ascend.paged_state import (
+        decode_state_indices_multi,
+        seed_state_segment,
+    )
+
+    npu_causal_conv1d_update = _load_npu_causal_conv1d_update()
+    batch, dim, token_count = x.shape
+    read_idx, write_idxs = decode_state_indices_multi(
+        block_map, sequence_lengths, int(seq_size_per_block), token_count
+    )
+    npu_weight = weight.t().contiguous()
+    outputs = []
+    for token_idx in range(token_count):
+        src = read_idx if token_idx == 0 else write_idxs[token_idx - 1]
+        seed_state_segment(conv_state, src, write_idxs[token_idx])
+        # contiguous copy: x[:, :, t] is a strided slice of [B, dim, T]; the
+        # AscendC op requires a contiguous (or properly strided) 2-D input —
+        # the T==1 path's x[:, :, 0] happens to be contiguous, the multi
+        # slices are not.
+        x_work = x[:, :, token_idx].to(conv_state.dtype).contiguous()
+        # dedicated out= buffer: the op's fallback path copies into x, which
+        # would clobber the caller's view
+        out = torch.empty_like(x_work)
+        npu_causal_conv1d_update(
+            x=x_work,
+            conv_state=conv_state,
+            weight=npu_weight,
+            bias=bias,
+            activation=_activation_name(activation),
+            conv_state_indices=write_idxs[token_idx].to(torch.int32),
+            null_block_id=0,
+            out=out,
+        )
+        outputs.append(out)
+    output = torch.stack(outputs, dim=-1)  # [batch, dim, T]
+    if squeeze_token_axis:
+        output = output.squeeze(-1)
+    return output.to(original_dtype)
+
+
 def _activation_mode(activation: Union[bool, str, None]) -> int:
     if activation is None or activation is False:
         return 0
@@ -432,14 +495,24 @@ def causal_conv1d_update(
     if weight.dim() != 2 or weight.shape[0] != dim:
         raise ValueError("weight must have shape (dim, width)")
 
-    # Standard decode (one token per sequence): device-metadata path.
-    if (
-        token_count == 1
-        and block_map.ndim == 2
-        and block_map.shape[0] == batch
-    ):
-        return _causal_conv1d_update_device(
-            x[:, :, 0],
+    # Standard decode (one token) and multi-token speculative verify share
+    # the device-metadata paths (aclgraph-capturable, no D2H).
+    if block_map.ndim == 2 and block_map.shape[0] == batch:
+        if token_count == 1:
+            return _causal_conv1d_update_device(
+                x[:, :, 0],
+                conv_state,
+                weight,
+                bias,
+                activation,
+                block_map,
+                sequence_lengths,
+                int(seq_size_per_block),
+                original_dtype,
+                squeeze_token_axis,
+            )
+        return _causal_conv1d_update_multi_device(
+            x,
             conv_state,
             weight,
             bias,
@@ -503,20 +576,31 @@ def causal_conv1d_update(
             cache_indices.append(target_page)
 
         token_output = npu_causal_conv1d(
-            x=x_work[:, :, token_index],
+            # [B, 1, D]: the host-metadata ABI only accepts the initial-state
+            # combination with a rank-3 x and run_mode=0 (FN); run_mode=1
+            # (UPDATE) rejects has_initial_state with a workspace error.
+            x=x_work[:, :, token_index].unsqueeze(1),
             weight=npu_weight,
             bias=bias,
             conv_states=npu_states,
             cache_indices=cache_indices,
+            # Without has_initial_state the kernel treats conv_states as a
+            # pure output and restarts the sliding window from zeros — the
+            # seeded history (the last tokens of the real context) is lost,
+            # which corrupts the first speculative tokens of every verify
+            # round and degrades the context cumulatively. initial_state_mode
+            # is a per-sequence int array (fla_npu _runtime.int_array).
+            initial_state_mode=[1] * batch,
             activation_mode=_activation_mode(activation),
             pad_slot_id=pad_slot_id,
-            run_mode=1,
+            run_mode=0,
             head_num=0,
         )
         output_tokens.append(token_output)
 
     if output_tokens:
-        output = torch.stack(output_tokens, dim=-1)
+        # token_output: [B, 1, D] -> stack back to [B, D, T]
+        output = torch.stack([t.squeeze(1) for t in output_tokens], dim=-1)
     else:
         output = torch.empty_like(x_work)
     if squeeze_token_axis:
