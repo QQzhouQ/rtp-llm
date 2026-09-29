@@ -200,16 +200,31 @@ def solve_tril(
 ) -> torch.Tensor:
     batch, seqlen, _, chunk_size = A.shape
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
-    chunk_indices = _prepare_chunk_indices(cu, chunk_size)
     # The standalone seq2047 comparison establishes FP16 as substantially
     # more accurate than BF16 for this inverse on the currently supported SoC.
-    out = _get_ascendc_ops().npu_solve_tri(
-        x=A.to(torch.float16),
+    x = A.to(torch.float16)
+    ascendc = _get_ascendc_ops()
+    if cu is None:
+        out = ascendc.npu_solve_tri(
+            x=x,
+            cu_seqlens=None,
+            chunk_indices=None,
+            layout="bsnd",
+        )
+        return out.to(output_dtype)
+    # The AscendC solve_tri only honours cu_seqlens/chunk_indices in the TND
+    # layout: BSND tiles chunks at chunk_idx * chunk_size on the token axis
+    # and ignores the sequence starts, so a varlen batch whose later
+    # sequences start at chunk-unaligned positions reads across sequence
+    # boundaries (verified bit-identical to a whole-batch tiling). Flatten
+    # [1, T, H, CS] to the 3-D TND form for the varlen call.
+    out = ascendc.npu_solve_tri(
+        x=x.reshape(seqlen, A.shape[2], chunk_size),
         cu_seqlens=cu,
-        chunk_indices=chunk_indices,
-        layout="bsnd",
+        chunk_indices=_prepare_chunk_indices(cu, chunk_size),
+        layout="tnd",
     )
-    return out.to(output_dtype)
+    return out.reshape(A.shape).to(output_dtype)
 
 
 def recompute_w_u_fwd(

@@ -1,9 +1,6 @@
 import torch
 import torch_npu
 
-from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params import (
-    split_kv_physical,
-)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 
