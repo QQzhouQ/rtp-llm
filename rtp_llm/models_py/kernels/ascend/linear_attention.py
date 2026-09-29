@@ -200,15 +200,28 @@ def solve_tril(
 ) -> torch.Tensor:
     batch, seqlen, _, chunk_size = A.shape
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
-    chunk_indices = _prepare_chunk_indices(cu, chunk_size)
     # The standalone seq2047 comparison establishes FP16 as substantially
     # more accurate than BF16 for this inverse on the currently supported SoC.
-    out = _get_ascendc_ops().npu_solve_tri(
-        x=A.to(torch.float16),
-        cu_seqlens=cu,
-        chunk_indices=chunk_indices,
-        layout="bsnd",
-    )
+    x = A.to(torch.float16)
+    ascendc = _get_ascendc_ops()
+    if cu is None:
+        out = ascendc.npu_solve_tri(
+            x=x,
+            cu_seqlens=None,
+            chunk_indices=None,
+            layout="bsnd",
+        )
+    else:
+        # varlen：tnd 布局（[T_total, H, CS]），kernel 依 cu_seqlens 按序列起点切块，
+        # chunk_indices 供 tiling 统计 (seq_idx, chunk_idx) tile 分核。
+        # （历史注：旧 wheel 对 tnd 有进程级崩溃，曾以"按序列分段 bsnd"过渡；
+        #   fla-npu 26.7.0.dev0+main.7dfeb450 起恢复 tnd 透传，回归单次调用。）
+        out = ascendc.npu_solve_tri(
+            x=x.reshape(seqlen, A.shape[2], chunk_size),
+            cu_seqlens=cu,
+            chunk_indices=_prepare_chunk_indices(cu, chunk_size),
+            layout="tnd",
+        ).reshape(A.shape)
     return out.to(output_dtype)
 
 
