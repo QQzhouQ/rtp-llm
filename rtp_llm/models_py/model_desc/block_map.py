@@ -24,4 +24,19 @@ def select_block_map_for_layer(
         attention_inputs.kv_cache_kernel_block_id_host = (
             attention_inputs.kv_cache_kernel_block_id_host_by_group[gid]
         )
+
+    # GDN/linear-attention state addressing is physical-block granular; keep
+    # the physical tables in sync with the same per-layer group selection.
+    if attention_inputs.kv_cache_block_id_device_by_group is not None and len(
+        attention_inputs.kv_cache_block_id_device_by_group
+    ):
+        attention_inputs.kv_cache_block_id_device = (
+            attention_inputs.kv_cache_block_id_device_by_group[gid]
+        )
+    if attention_inputs.kv_cache_block_id_host_by_group is not None and len(
+        attention_inputs.kv_cache_block_id_host_by_group
+    ):
+        attention_inputs.kv_cache_block_id_host = (
+            attention_inputs.kv_cache_block_id_host_by_group[gid]
+        )
     return gid

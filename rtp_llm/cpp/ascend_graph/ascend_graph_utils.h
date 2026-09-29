@@ -42,6 +42,13 @@ public:
             inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group =
             inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group;
+        // Physical per-group tables (GDN state addressing) — without this the
+        // captured graph's block-map buffers stay empty and every replay
+        // gathers page 0 (the pad slot), corrupting all GDN layers.
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device_by_group =
+            inputs.attention_inputs.kv_cache_block_id_device_by_group;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_host_by_group =
+            inputs.attention_inputs.kv_cache_block_id_host_by_group;
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.attention_inputs.prefix_lengths_d        = inputs.attention_inputs.prefix_lengths_d;

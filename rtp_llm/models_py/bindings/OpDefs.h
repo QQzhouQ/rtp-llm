@@ -177,6 +177,14 @@ struct PyAttentionInputs {
     // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
     std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
+    // - kv_cache_block_id_*_by_group: vector of 2-D physical block tables, each [batch, max_blocks].
+    //   GDN/linear-attention state addressing is physical-block granular (one
+    //   state page per 1024-token block); the speculative multi-token contract
+    //   walks consecutive physical entries, so the model layer must gather
+    //   state pages from these tables, not from the kernel tables (whose
+    //   values are kernel block ids = phys * bpk + half).
+    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
+    std::vector<torch::Tensor> kv_cache_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).

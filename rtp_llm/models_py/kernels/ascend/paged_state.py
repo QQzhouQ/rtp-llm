@@ -51,6 +51,37 @@ def decode_state_indices(
     return read_idx, write_idx
 
 
+def decode_state_indices_multi(
+    block_map: torch.Tensor,
+    sequence_lengths_plus_1: torch.Tensor,
+    seq_size_per_block: int,
+    token_count: int,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Gather (read_page, [write_page_t]) for the multi-token speculative
+    contract (target-verify, T = k + 1 tokens per sequence):
+
+        read  page = block_map[b, max(len - 2, 0) // page]
+        write page[t] = block_map[b, (len - 1) // page + t]
+
+    Device-only ops (gather/clamp) — aclgraph-capturable, semantics identical
+    to ``recurrent._resolve_state_pages`` / the conv host contract.  The
+    write columns are clamped to the table width so capture-time buffers with
+    a shorter valid prefix stay in range; replay recomputes them from the
+    refreshed ``sequence_lengths_plus_1`` / block-table buffers.
+    """
+
+    length = sequence_lengths_plus_1.reshape(-1).to(torch.int64)
+    read_col = (length - 2).clamp_min(0) // seq_size_per_block
+    write_base = (length - 1).clamp_min(0) // seq_size_per_block
+    max_col = block_map.shape[1] - 1
+    read_idx = block_map.gather(1, read_col.clamp_max(max_col).view(-1, 1)).squeeze(1)
+    write_idxs = []
+    for t in range(token_count):
+        col = (write_base + t).clamp_max(max_col)
+        write_idxs.append(block_map.gather(1, col.view(-1, 1)).squeeze(1))
+    return read_idx, write_idxs
+
+
 def paged_row_view(seg_view: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     """Derive a 2D page-row view ``[pages, page_stride]`` from a segment view.
 
@@ -107,4 +138,9 @@ def seed_state_segment(
     migrate_state_rows(seg_view, src, write_idx)
 
 
-__all__ = ["decode_state_indices", "paged_row_view", "seed_state_segment"]
+__all__ = [
+    "decode_state_indices",
+    "decode_state_indices_multi",
+    "paged_row_view",
+    "seed_state_segment",
+]

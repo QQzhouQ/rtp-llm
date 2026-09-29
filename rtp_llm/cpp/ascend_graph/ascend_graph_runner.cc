@@ -272,9 +272,32 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
         }
     }
 
+    // Per-group physical block tables (GDN state addressing is physical-block
+    // granular; values must be physical page ids, not kernel block ids).
+    inputs.attention_inputs.kv_cache_block_id_device_by_group.clear();
+    inputs.attention_inputs.kv_cache_block_id_host_by_group.clear();
+    if (kv_cache_group_num_ > 1) {
+        const int64_t phys_blocks = max_kv_blocks;
+        inputs.attention_inputs.kv_cache_block_id_device_by_group.reserve(kv_cache_group_num_);
+        inputs.attention_inputs.kv_cache_block_id_host_by_group.reserve(kv_cache_group_num_);
+        for (int g = 0; g < kv_cache_group_num_; ++g) {
+            inputs.attention_inputs.kv_cache_block_id_device_by_group.push_back(
+                torch::ones({int(max_bs_), phys_blocks}, options_npu_int32_));
+            inputs.attention_inputs.kv_cache_block_id_host_by_group.push_back(
+                torch::ones({int(max_bs_), phys_blocks}, options_cpu_int32_).pin_memory());
+        }
+    }
+
     if (num_tokens_per_bs_ > 1) {
+        // Target-verify graph: cap the capture-time prefix so the FIA
+        // attention's shared 2048x2048 causal mask covers the warmup
+        // (kv_len = prefix + tokens must stay below 2048).  Only shapes
+        // matter for the captured ops — the per-replay values are
+        // recomputed from the refreshed capture buffers.
+        const int64_t capture_prefix =
+            std::min<int64_t>(max_seq_len_ - num_tokens_per_bs_, 2048 - num_tokens_per_bs_ - 8);
         inputs.attention_inputs.prefix_lengths =
-            torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
+            torch::full({int(max_bs_)}, capture_prefix, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_d = inputs.attention_inputs.prefix_lengths.to(options_npu_int32_.device());
     } else {
         inputs.attention_inputs.prefix_lengths   = torch::empty({0}, options_cpu_int32_).pin_memory();
@@ -366,6 +389,23 @@ void AscendGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_si
                 cap.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].slice(0, 0, batch_size));
             inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
                 cap.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].slice(0, 0, batch_size));
+        }
+    }
+
+    // Physical per-group tables (GDN state addressing) — slice like the kernel
+    // tables above.
+    inputs.attention_inputs.kv_cache_block_id_device_by_group.clear();
+    inputs.attention_inputs.kv_cache_block_id_host_by_group.clear();
+    if (!cap.attention_inputs.kv_cache_block_id_device_by_group.empty()
+        && !cap.attention_inputs.kv_cache_block_id_host_by_group.empty()) {
+        const size_t group = cap.attention_inputs.kv_cache_block_id_device_by_group.size();
+        inputs.attention_inputs.kv_cache_block_id_device_by_group.reserve(group);
+        inputs.attention_inputs.kv_cache_block_id_host_by_group.reserve(group);
+        for (size_t g = 0; g < group; ++g) {
+            inputs.attention_inputs.kv_cache_block_id_device_by_group.push_back(
+                cap.attention_inputs.kv_cache_block_id_device_by_group[g].slice(0, 0, batch_size));
+            inputs.attention_inputs.kv_cache_block_id_host_by_group.push_back(
+                cap.attention_inputs.kv_cache_block_id_host_by_group[g].slice(0, 0, batch_size));
         }
     }
 
@@ -604,6 +644,12 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     for (auto& tbl_h : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group) {
         tbl_h.fill_(0);
     }
+    for (auto& tbl_d : py_model_inputs.attention_inputs.kv_cache_block_id_device_by_group) {
+        tbl_d.fill_(0);
+    }
+    for (auto& tbl_h : py_model_inputs.attention_inputs.kv_cache_block_id_host_by_group) {
+        tbl_h.fill_(0);
+    }
 
     const int token_num = inputs.input_ids.size(0);
 
@@ -641,6 +687,19 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         }
     }
 
+    // Hybrid cache per-group physical block tables (GDN state pages)
+    if (!inputs.attention_inputs.kv_cache_block_id_device_by_group.empty()
+        && !py_model_inputs.attention_inputs.kv_cache_block_id_device_by_group.empty()) {
+        const size_t group = inputs.attention_inputs.kv_cache_block_id_device_by_group.size();
+        RTP_LLM_CHECK_WITH_INFO(
+            group == py_model_inputs.attention_inputs.kv_cache_block_id_device_by_group.size(),
+            "ascend graph: kv_cache_block_id_device_by_group size mismatch");
+        for (size_t g = 0; g < group; ++g) {
+            copyTensorSlice(inputs.attention_inputs.kv_cache_block_id_device_by_group[g],
+                            py_model_inputs.attention_inputs.kv_cache_block_id_device_by_group[g]);
+        }
+    }
+
     // -------- Host tensors (H2H, pinned memory) --------
     if (inputs.attention_inputs.cu_seqlens_host.defined()) {
         auto src = inputs.attention_inputs.cu_seqlens_host.slice(0, 0, state.current_batch_size + 1);
@@ -661,10 +720,19 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
                     py_model_inputs.attention_inputs.kv_cache_block_id_host);
     if (inputs.attention_inputs.kv_cache_layer_to_group.defined()
         && inputs.attention_inputs.kv_cache_layer_to_group.numel() > 0) {
-        py_model_inputs.attention_inputs.kv_cache_layer_to_group.copy_(
-            inputs.attention_inputs.kv_cache_layer_to_group);
+        // The captured table may be the engine-wide sp layout (42 global
+        // layers: 40 target + 2 MTP draft) while the replay input carries
+        // this model's own mapping (target verify: 40) — either direction.
+        // The per-layer selection only reads the first N entries, so clamp
+        // the copy to the common width.
+        const int64_t dst_n = py_model_inputs.attention_inputs.kv_cache_layer_to_group.numel();
+        const int64_t src_n = inputs.attention_inputs.kv_cache_layer_to_group.numel();
+        const int64_t common = std::min(dst_n, src_n);
+        py_model_inputs.attention_inputs.kv_cache_layer_to_group.slice(0, 0, common).copy_(
+            inputs.attention_inputs.kv_cache_layer_to_group.slice(0, 0, common));
     }
-    if (inputs.attention_inputs.sequence_lengths.defined()) {
+    if (inputs.attention_inputs.sequence_lengths.defined()
+        && inputs.attention_inputs.sequence_lengths.numel() > 0) {
         auto src = inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size);
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size).copy_(src);
     }
@@ -712,10 +780,23 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         }
     }
 
-    // Compute sequence_lengths_plus_1_d from sequence_lengths (engine doesn't populate it)
-    py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, state.current_batch_size) =
-        py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
-            .to(options_npu_int32_.device()) + 1;
+    // Compute sequence_lengths_plus_1_d (engine doesn't populate it).
+    // Normal decode: sequence_lengths + 1.  Target-verify: sequence_lengths
+    // is EMPTY (MtpExecutor clears it) — derive from prefix_lengths instead,
+    // otherwise the buffer keeps the capture-time ceiling value and every
+    // GDN page computation reads/writes wrong pages on replay.
+    if (is_target_verify_
+        && inputs.attention_inputs.prefix_lengths.defined()
+        && inputs.attention_inputs.prefix_lengths.numel() > 0) {
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, state.current_batch_size) =
+            inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size)
+                .to(options_npu_int32_.device()) + 1;
+    } else if (inputs.attention_inputs.sequence_lengths.defined()
+               && inputs.attention_inputs.sequence_lengths.numel() > 0) {
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, state.current_batch_size) =
+            inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
+                .to(options_npu_int32_.device()) + 1;
+    }
 
     // -------- Update attention impl with the freshly-copied inputs --------
     {

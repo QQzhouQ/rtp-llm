@@ -91,4 +91,47 @@ PYBIND11_MODULE(sampler_test_module, m) {
         py::arg("generators")          = py::none(),
         "Execute greedy/random sampling on Ascend NPU.\n\n"
         "Returns dict with keys: token_ids, success, cum_log_probs, output_all_probs.");
+
+    // Chain speculative sampling (MTP verify): wraps
+    // execChainSpeculativeSampling with the same tensor contract as
+    // SpeculativeSampler::batchSample.
+    m.def(
+        "chain_speculative_sampling",
+        [](torch::Tensor draft_probs,
+           torch::Tensor draft_token_ids,
+           torch::Tensor uniform_samples,
+           torch::Tensor target_probs) -> py::dict {
+            const int64_t batch = draft_probs.size(0);
+            const int64_t k     = draft_probs.size(1);
+
+            auto output_token_ids = torch::zeros(
+                {batch, k + 1}, torch::TensorOptions().dtype(torch::kInt32).device(draft_probs.device()));
+            auto output_accepted_token_num =
+                torch::zeros({batch}, torch::TensorOptions().dtype(torch::kInt32).device(draft_probs.device()));
+            auto output_emitted_token_num =
+                torch::zeros({batch}, torch::TensorOptions().dtype(torch::kInt32).device(draft_probs.device()));
+
+            SpeculativeSamplingParams params(draft_probs,
+                                             draft_token_ids,
+                                             uniform_samples,
+                                             target_probs,
+                                             output_token_ids,
+                                             output_accepted_token_num,
+                                             output_emitted_token_num);
+            execChainSpeculativeSampling(params);
+
+            py::dict result;
+            result["output_token_ids"]         = output_token_ids.cpu();
+            result["output_emitted_token_num"] = output_emitted_token_num.cpu();
+            result["output_accepted_token_num"] = output_accepted_token_num.cpu();
+            return result;
+        },
+        py::arg("draft_probs"),
+        py::arg("draft_token_ids"),
+        py::arg("uniform_samples"),
+        py::arg("target_probs"),
+        "Execute chain speculative sampling on Ascend NPU.\n\n"
+        "draft_probs [B,k,V] f32, draft_token_ids [B,k] i32, uniform_samples [B,k+1] f32,\n"
+        "target_probs [B,k+1,V] f32. Returns dict: output_token_ids [B,k+1] i32,\n"
+        "output_emitted_token_num [B] i32, output_accepted_token_num [B] i32.");
 }

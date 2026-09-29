@@ -485,7 +485,74 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 }
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    // Chain speculative sampling (Leviathan et al. 2023) as a vectorized
+    // torch implementation, mirroring the ROCm HIP kernel semantics
+    // (cpp/rocm/speculative_sampling/sampling.cu ChainSpeculativeSampling):
+    //   1. accept draft token i while u * p_i < q_i (strict compare); the
+    //      first rejection truncates the chain;
+    //   2. emitted = pos + 1 (pos = index of first rejection, k if all
+    //      accepted);
+    //   3. if pos < k, resample the rejected position from the residual
+    //      distribution relu(q - p) via inverse-CDF with the next uniform;
+    //      pad the remaining positions with -1.
+    // Shapes (all on device, allocated by SpeculativeSampler::batchSample):
+    //   draft_probs     [B, k, V]     float32
+    //   draft_token_ids [B, k]        int32
+    //   uniform_samples [B, k + 1]    float32
+    //   target_probs    [B, k + 1, V] float32
+    //   output_token_ids_d          [B, k + 1] int32 (pre-zeroed)
+    //   output_emitted_token_num_d  [B]        int32 (kernel semantics: += pos + 1)
+    //   output_accepted_token_num_d [B]        int32 (never written, same as HIP kernel)
+    const torch::Tensor& draft_probs  = params.draft_probs_d;
+    const torch::Tensor& target_probs = params.target_probs_d;
+    const int64_t        batch        = draft_probs.size(0);
+    const int64_t        k            = draft_probs.size(1);
+
+    // Gather the draft token probabilities under the target and draft
+    // distributions: q = target_probs[b, i, draft_id], p = draft_probs[b, i, draft_id].
+    auto draft_ids_l = params.draft_token_ids_d.to(torch::kLong);
+    auto sel         = draft_ids_l.unsqueeze(-1);  // [B, k, 1]
+    auto q_sel       = target_probs.slice(1, 0, k).gather(-1, sel).squeeze(-1);  // [B, k]
+    auto p_sel       = draft_probs.gather(-1, sel).squeeze(-1);                 // [B, k]
+
+    // Chain acceptance: prefix product of the per-step accept flags equals
+    // the HIP kernel's sequential break-on-first-rejection.
+    auto accept        = (params.uniform_samples_d.slice(1, 0, k) * p_sel) < q_sel;  // [B, k]
+    auto accept_prefix = accept.to(torch::kFloat).cumprod(1).to(torch::kBool);      // [B, k]
+    auto pos           = accept_prefix.sum(1);                                      // [B]
+
+    // Output tokens: accepted draft ids on the prefix, -1 elsewhere. The
+    // bonus slot [., k] stays -1 on the all-accepted rows (the HIP kernel
+    // leaves it untouched too); the host side overwrites the last emitted
+    // token with the target sampler's own token either way.
+    auto neg_one = torch::full_like(draft_ids_l, -1);
+    auto out_k   = torch::where(accept_prefix, draft_ids_l, neg_one);  // [B, k]
+    auto output  = torch::full({batch, k + 1},
+                              -1,
+                              torch::TensorOptions().dtype(torch::kInt32).device(draft_probs.device()));
+    output.slice(1, 0, k).copy_(out_k);
+
+    // Residual resample at the first rejected position (rows with pos < k).
+    // nonzero() syncs with the host, which is legal here: the target-verify
+    // path never runs inside the decode graph.
+    auto rejected_rows = (pos < k).nonzero().squeeze(-1);  // [n]
+    if (rejected_rows.numel() > 0) {
+        auto pos_r = pos.index({rejected_rows});  // [n]
+        // Paired advanced indexing (1-D index tensors) picks row/step pairs.
+        auto t_row = target_probs.index({rejected_rows, pos_r});  // [n, V]
+        auto d_row = draft_probs.index({rejected_rows, pos_r});    // [n, V]
+        auto resid = (t_row - d_row).clamp_min(0);
+        auto cdf   = resid.cumsum(-1);  // [n, V]
+        auto u_col = params.uniform_samples_d.index({rejected_rows, (pos_r + 1).clamp_max(k)});  // [n]
+        auto u2    = u_col.unsqueeze(1) * cdf.slice(1, -1);                                      // [n, 1]
+        // First index where cdf > u2 (the HIP kernel's atomicMin over the
+        // greater_than_u heads); clamp to V-1 when u2 reaches sum(r).
+        auto sampled = (cdf <= u2).sum(-1).clamp_max(t_row.size(1) - 1);  // [n]
+        output.index_put_({rejected_rows, pos_r}, sampled.to(torch::kInt32));
+    }
+
+    params.output_token_ids_d.copy_(output);
+    params.output_emitted_token_num_d += (pos + 1).to(torch::kInt32);
 }
 
 #else  // !USING_CUDA — ROCm platform
