@@ -91,21 +91,20 @@ class AscendDecodeImpl(FMHAImplBase):
         if not kernel_page:
             kernel_page = (self.attn_inputs.kv_cache.seq_size_per_block
                            if self.attn_inputs.kv_cache is not None else 128)
-        # slot_mapping indexes the physical storage: kernel_block = phys*bpk+o
-        phys_page = kernel_page * max(1, blocks_per_phys)
+        # kernel-flat slots (kb * kernel_page + offset), paired with the
+        # kernel-block views in the KV write op / FIA reads
         if block_table is not None and block_table.numel() > 0 and positions_d.numel() > 0:
             if block_table.ndim != 2:
                 block_table = block_table.reshape(-1, block_table.shape[-1])
             max_blocks = block_table.size(1)
             pos_long = positions_d.long()
             block_index = (pos_long // kernel_page).clamp(max=max_blocks - 1)
+            block_offset = pos_long % kernel_page
             slot_block_numbers = torch.gather(
                 block_table, 1,
                 block_index.unsqueeze(1).to(block_table.dtype)
             ).squeeze(1).long().clamp(min=0)
-            phys_block_numbers = slot_block_numbers // max(1, blocks_per_phys)
-            phys_offset = pos_long % phys_page
-            slot_mapping = (phys_block_numbers * phys_page + phys_offset).to(torch.int64)
+            slot_mapping = (slot_block_numbers * kernel_page + block_offset).to(torch.int64)
         else:
             slot_mapping = torch.empty(0, dtype=torch.int64, device=device)
 
@@ -254,9 +253,12 @@ class AscendDecodeAttnOp:
         return self._forward_fia(q, kv_cache, block_table, context_lens)
 
     def _split_kv(self, kv_cache):
-        # The per-layer view is at kernel-block granularity, which interleaves
-        # K and V once a physical block is subdivided; split them explicitly.
-        return split_kv_kernel_blocks(kv_cache, self.blocks_per_phys)
+        # Zero-copy kernel-block K/V views in the 3-D form FIA requires
+        # (the old split_kv_kernel_blocks route materialised a copy).
+        base = kv_cache.kv_cache_base
+        k_cache = base[:, 0].reshape(base.shape[0], base.shape[2], -1)
+        v_cache = base[:, 1].reshape(base.shape[0], base.shape[2], -1)
+        return k_cache, v_cache, base.shape[2]
 
     def _forward_fia_graph(self, q, kv_cache, block_table, context_lens):
         k_cache, v_cache, page_size = self._split_kv(kv_cache)
