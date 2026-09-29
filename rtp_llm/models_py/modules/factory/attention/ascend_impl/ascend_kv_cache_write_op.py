@@ -30,11 +30,11 @@ class AscendKVCacheWriteOp:
         if kv_cache is None:
             return
 
-        # slot_mapping addresses tokens as physical_block * physical_seq +
-        # offset, so the scatter targets must be the physical K/V views: the
-        # per-layer kernel-block view interleaves K and V when a physical block
-        # is subdivided.
-        k_view, v_view = split_kv_physical(kv_cache, self.params.blocks_per_phys)
+        # Kernel-block K/V halves, paired with the kernel-flat slots —
+        # one addressing for the whole FIA read/write chain.
+        base = kv_cache.kv_cache_base
+        k_view = base[:, 0]
+        v_view = base[:, 1]
 
         slot_mapping = self.params.slot_mapping
         if slot_mapping.dtype not in (torch.int32, torch.int64):
