@@ -40,12 +40,25 @@ source "${ASCEND_CANN_PACKAGE_PATH}/bin/setenv.bash" || {
     exit 1
 }
 
-# 确保 conda Python 在 PATH 最前面（CANN kernel 编译脚本依赖 numpy）
-if [ -d "/root/miniconda3/envs/py310/bin" ]; then
-    export PATH="/root/miniconda3/envs/py310/bin:${PATH}"
-    HOST_PYTHON="/root/miniconda3/envs/py310/bin/python3"
-else
-    HOST_PYTHON="/usr/bin/python3.10"
+# 确保 conda Python 在 PATH 最前面（CANN kernel 编译脚本依赖 numpy）。
+# opc/tbe 用 "#!/usr/bin/env python3" 解析解释器：bazel genrule 是干净环境，
+# 系统 python 无 numpy 会导致 kernel json 不生成，故逐个探测带 numpy 的解释器。
+HOST_PYTHON=""
+for _py_bin in "/root/miniconda3/envs/py310/bin" "/opt/conda/envs/py310/bin" "/opt/conda/bin"; do
+    if [ -x "${_py_bin}/python3" ] && "${_py_bin}/python3" -c "import numpy" >/dev/null 2>&1; then
+        export PATH="${_py_bin}:${PATH}"
+        HOST_PYTHON="${_py_bin}/python3"
+        echo "[AscendC] host python: ${HOST_PYTHON}"
+        break
+    fi
+done
+if [ -z "${HOST_PYTHON}" ]; then
+    if python3 -c "import numpy" >/dev/null 2>&1; then
+        HOST_PYTHON="$(command -v python3)"
+    else
+        echo "[AscendC] ERROR: no python3 with numpy found (opc/tbe require numpy)." >&2
+        exit 1
+    fi
 fi
 
 # ====================================================================
