@@ -27,7 +27,7 @@ genrule(
     ],
     # 算子名称列表：单算子用 "apply_top_k_top_p_custom"，多算子用分号分隔 "op_a;op_b;op_c"
     cmd = "bash $(location build_for_bazel.sh) " +
-          "$(RULEDIR) 'apply_top_k_top_p_custom' ascend910b",
+          "$(RULEDIR) 'apply_top_k_top_p_custom' 'ascend910b;ascend950'",
     tools = ["build_for_bazel.sh"],
     # 仅在 Ascend 平台执行；其他平台跳过
     target_compatible_with = select({
