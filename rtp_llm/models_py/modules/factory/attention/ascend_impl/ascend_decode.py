@@ -5,7 +5,6 @@ from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params 
     AscendAttnParams,
     _blocks_per_phys_from_config,
     compute_ascend_attn_params,
-    split_kv_kernel_blocks,
 )
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_kv_cache_write_op import AscendKVCacheWriteOp
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope_emb import AscendRotaryEmbeddingOp

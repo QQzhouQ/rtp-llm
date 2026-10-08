@@ -55,41 +55,6 @@ def infer_blocks_per_phys(attn_inputs) -> int:
     return max(1, kernel_cols // phys_cols)
 
 
-def _physical_kv_view(kv_cache, blocks_per_phys: int):
-    """Return the MHA cache as a physical-block view plus the split factor.
-
-    ``getLayerCache`` hands back
-    ``[kernel_block_num, 2, kernel_seq, num_kv_heads, head_dim]``.  That merged
-    grouping only holds when the kernel block equals the physical block: a
-    physical block stores every K token before every V token, so subdividing it
-    while keeping the ``2`` axis inside makes each kernel block straddle the
-    K/V boundary.  Rebuild the physical view so K and V can be split first.
-    """
-    base = kv_cache.kv_cache_base
-    kernel_page = int(getattr(kv_cache, "seq_size_per_block", 0) or base.shape[2])
-    bpk = max(1, int(blocks_per_phys))
-    if bpk <= 1:
-        return base, 1, kernel_page
-    phys_blocks = base.shape[0] // bpk
-    phys = base.reshape(phys_blocks, 2, kernel_page * bpk, *base.shape[3:])
-    return phys, bpk, kernel_page
-
-
-def split_kv_physical(kv_cache, blocks_per_phys: int):
-    """K/V views at physical-block granularity: [blocks, phys_seq, heads, dim]."""
-    phys, _, _ = _physical_kv_view(kv_cache, blocks_per_phys)
-    return phys[:, 0], phys[:, 1]
-
-
-def split_kv_kernel_blocks(kv_cache, blocks_per_phys: int):
-    """K/V views at kernel-block granularity: [kernel_blocks, kernel_seq, H*D]."""
-    phys, bpk, kernel_page = _physical_kv_view(kv_cache, blocks_per_phys)
-    blocks = phys.shape[0] * bpk
-    k = phys[:, 0].reshape(blocks, kernel_page, -1)
-    v = phys[:, 1].reshape(blocks, kernel_page, -1)
-    return k, v, kernel_page
-
-
 def _blocks_per_phys_from_config(attn_configs, attn_inputs) -> int:
     """Kernel blocks per physical block.
 

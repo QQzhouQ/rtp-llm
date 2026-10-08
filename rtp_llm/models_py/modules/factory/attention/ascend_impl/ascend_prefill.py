@@ -5,7 +5,6 @@ from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_attn_params 
     AscendAttnParams,
     _blocks_per_phys_from_config,
     compute_ascend_attn_params,
-    split_kv_kernel_blocks,
 )
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_kv_cache_write_op import AscendKVCacheWriteOp
@@ -148,11 +147,17 @@ class AscendPrefillAttnOp:
         self.actual_seq_q = torch.cumsum(seq_lens_q, dim=0)
         self.actual_seq_kv = seq_lens_kv
 
+    def _split_kv(self, kv_cache):
+        # Zero-copy K/V half views (base[:, 0/1]), matching the write op and
+        # decode read addressing.  The old split_kv_kernel_blocks route
+        # mis-paired K/V once the write op moved to half addressing.
+        base = kv_cache.kv_cache_base
+        k_cache = base[:, 0].reshape(base.shape[0], base.shape[2], -1)
+        v_cache = base[:, 1].reshape(base.shape[0], base.shape[2], -1)
+        return k_cache, v_cache, base.shape[2]
+
     def forward(self, q, kv_cache):
-        # The per-layer view is at kernel-block granularity, which interleaves
-        # K and V once a physical block is subdivided; split them explicitly.
-        k_cache, v_cache, page_size = split_kv_kernel_blocks(
-            kv_cache, self.blocks_per_phys)
+        k_cache, v_cache, page_size = self._split_kv(kv_cache)
         block_table = self.block_table
         if block_table is not None and block_table.device.type != q.device.type:
             block_table = block_table.to(q.device)
