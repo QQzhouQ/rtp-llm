@@ -966,19 +966,6 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
-        import os as _os_dbg
-        if (_os_dbg.environ.get("RTP_LLM_PREFILL_DBG", "") not in ("", "0")
-                and attention_inputs.is_prefill
-                and attention_inputs.input_lengths.shape[0] > 1):
-            import logging as _lg
-            _lg.getLogger("prefill_dbg").info(
-                "[PREFILL-DBG] batch=%d input_lengths=%s prefix=%s cu_seqlens=%s bt_group0_row0=%s",
-                attention_inputs.input_lengths.shape[0],
-                attention_inputs.input_lengths[:8].tolist(),
-                attention_inputs.prefix_lengths[:8].tolist() if attention_inputs.prefix_lengths.numel() else [],
-                attention_inputs.cu_seqlens[:9].tolist() if attention_inputs.cu_seqlens.numel() else [],
-                attention_inputs.kv_cache_block_id_host[0][:4].tolist() if attention_inputs.kv_cache_block_id_host is not None and attention_inputs.kv_cache_block_id_host.numel() else [],
-            )
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()

@@ -211,18 +211,20 @@ def solve_tril(
             chunk_indices=None,
             layout="bsnd",
         )
-    else:
-        # varlen：tnd 布局（[T_total, H, CS]），kernel 依 cu_seqlens 按序列起点切块，
-        # chunk_indices 供 tiling 统计 (seq_idx, chunk_idx) tile 分核。
-        # （历史注：旧 wheel 对 tnd 有进程级崩溃，曾以"按序列分段 bsnd"过渡；
-        #   fla-npu 26.7.0.dev0+main.7dfeb450 起恢复 tnd 透传，回归单次调用。）
-        out = ascendc.npu_solve_tri(
-            x=x.reshape(seqlen, A.shape[2], chunk_size),
-            cu_seqlens=cu,
-            chunk_indices=_prepare_chunk_indices(cu, chunk_size),
-            layout="tnd",
-        ).reshape(A.shape)
-    return out.to(output_dtype)
+        return out.to(output_dtype)
+    # The AscendC solve_tri only honours cu_seqlens/chunk_indices in the TND
+    # layout: BSND tiles chunks at chunk_idx * chunk_size on the token axis
+    # and ignores the sequence starts, so a varlen batch whose later
+    # sequences start at chunk-unaligned positions reads across sequence
+    # boundaries (verified bit-identical to a whole-batch tiling). Flatten
+    # [1, T, H, CS] to the 3-D TND form for the varlen call.
+    out = ascendc.npu_solve_tri(
+        x=x.reshape(seqlen, A.shape[2], chunk_size),
+        cu_seqlens=cu,
+        chunk_indices=_prepare_chunk_indices(cu, chunk_size),
+        layout="tnd",
+    )
+    return out.reshape(A.shape).to(output_dtype)
 
 
 def recompute_w_u_fwd(
@@ -326,10 +328,7 @@ def chunk_fwd_o(
 ) -> torch.Tensor:
     batch, seqlen = q.shape[:2]
     value_heads = v.shape[-2]
-    # fla_npu chunk_fwd_o 仅注册了 chunk_size 64/128 的 AscendC kernel；
-    # 短序列取小 chunk（16/32）会触发 161002 崩溃，故不再向下取小，统一用调用方 chunk_size（默认 64）。
-    # 尾部不足 64 的块走 varlen block-map 标准 padding 路径，与长序列非整除时一致。
-    effective_chunk_size = chunk_size
+    effective_chunk_size = min(chunk_size, max(16, _next_power_of_two(seqlen)))
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
     chunk_indices = _prepare_chunk_indices(cu, effective_chunk_size)
     g_input = (
