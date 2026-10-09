@@ -51,6 +51,42 @@ def decode_state_indices(
     return read_idx, write_idx
 
 
+def speculative_state_indices(
+    block_map: torch.Tensor,
+    sequence_lengths_plus_1: torch.Tensor,
+    seq_size_per_block: int,
+    token_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather the read page and the per-token write pages for a T-token step.
+
+    Multi-token variant of :func:`decode_state_indices` (target verify feeds
+    K+1 tokens per sequence).  Semantics match the host loops it replaces:
+    every speculative token is snapshotted into a consecutive block-map entry
+    starting at ``(len - 1) // page``, and the state before the first token is
+    read from ``max(len - 2, 0) // page`` where ``len`` is
+    ``sequence_lengths_plus_1``.
+
+    Returns ``(read_idx, write_idx)`` with shapes ``(batch,)`` and
+    ``(batch, token_count)`` — int32 device tensors, never host lists, so the
+    step is aclgraph-capturable.
+    """
+
+    length = sequence_lengths_plus_1.reshape(-1).to(torch.int64)
+    max_col = block_map.shape[1]
+    read_col = ((length - 2).clamp_min(0) // seq_size_per_block).clamp(max=max_col - 1)
+    write_col0 = (length - 1).clamp_min(0) // seq_size_per_block
+    offsets = torch.arange(token_count, dtype=torch.int64, device=block_map.device)
+    write_cols = write_col0.unsqueeze(1) + offsets.unsqueeze(0)  # (batch, T)
+    in_range = write_cols < max_col
+    write_cols = write_cols.clamp(min=0, max=max_col - 1)
+    read_idx = block_map.gather(1, read_col.view(-1, 1)).squeeze(1)
+    write_idx = block_map.gather(1, write_cols)  # (batch, T)
+    # out-of-range entries become the null block (0): the fla_npu entries skip
+    # index 0, and index 0 is the engine's reserved block, never a real page.
+    write_idx = torch.where(in_range, write_idx, torch.zeros_like(write_idx))
+    return read_idx, write_idx
+
+
 def paged_row_view(seg_view: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     """Derive a 2D page-row view ``[pages, page_stride]`` from a segment view.
 
@@ -107,4 +143,9 @@ def seed_state_segment(
     migrate_state_rows(seg_view, src, write_idx)
 
 
-__all__ = ["decode_state_indices", "paged_row_view", "seed_state_segment"]
+__all__ = [
+    "decode_state_indices",
+    "speculative_state_indices",
+    "paged_row_view",
+    "seed_state_segment",
+]

@@ -1457,9 +1457,18 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     const auto& new_all_token_ids         = sampler_output.token_ids;
     const auto& propose_new_all_token_ids = draft_sampler_output.token_ids;
 
-    RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(new_all_token_ids).c_str());
-    RTP_LLM_LOG_DEBUG("propose_new_all_token_ids = [%s]",
-                      tensorDebugStringWithData<int64_t>(propose_new_all_token_ids).c_str());
+    // Guard the debug prints: token_ids tensors may be undefined (K=1 propose
+    // path leaves them empty) or int32 — tensorDebugStringWithData<int64_t>
+    // on those crashes the engine (SIGSEGV seen with log_level=DEBUG).
+    if (new_all_token_ids.defined() && new_all_token_ids.numel() > 0) {
+        RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]",
+                          tensorDebugStringWithData<int32_t>(new_all_token_ids).c_str());
+    }
+    if (propose_new_all_token_ids.defined() && propose_new_all_token_ids.numel() > 0
+        && propose_new_all_token_ids.scalar_type() == torch::kLong) {
+        RTP_LLM_LOG_DEBUG("propose_new_all_token_ids = [%s]",
+                          tensorDebugStringWithData<int64_t>(propose_new_all_token_ids).c_str());
+    }
 
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));

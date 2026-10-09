@@ -98,6 +98,70 @@ def _causal_conv1d_update_device(
     return out if squeeze_token_axis else out.unsqueeze(-1)
 
 
+def _causal_conv1d_update_tokens_device(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    activation: Union[bool, str, None],
+    block_map: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    seq_size_per_block: int,
+    original_dtype: torch.dtype,
+    squeeze_token_axis: bool,
+) -> torch.Tensor:
+    """Multi-token (target-verify) conv update with device-side metadata.
+
+    Same AscendC entry as the single-token device path, unrolled over the
+    static ``token_count`` (from ``x.shape``): the read/first-write pages are
+    gathered on device and each token seeds its page from the previous one
+    before updating in place.  No ``.cpu().tolist()`` anywhere, so the whole
+    step is aclgraph-capturable.
+    """
+
+    from rtp_llm.models_py.kernels.ascend.paged_state import (
+        seed_state_segment,
+        speculative_state_indices,
+    )
+
+    npu_causal_conv1d_update = _load_npu_causal_conv1d_update()
+    batch, dim, token_count = x.shape
+    read_idx, write_idx = speculative_state_indices(
+        block_map, sequence_lengths, seq_size_per_block, token_count
+    )
+    x_work = x.to(conv_state.dtype)
+    npu_weight = weight.t().contiguous()
+    npu_activation = _activation_name(activation)
+
+    output_tokens = []
+    for token_index in range(token_count):
+        # token 0 seeds from the previously committed page; later tokens seed
+        # from their predecessor's (possibly identical) page.  Triton precopy
+        # skips the same-page rows (the common case — K+1 tokens usually share
+        # one block), so the per-token seed costs nothing.
+        source = read_idx if token_index == 0 else write_idx[:, token_index - 1]
+        seed_state_segment(conv_state, source, write_idx[:, token_index])
+
+        x_token = x_work[:, :, token_index].contiguous()
+        out_token = torch.empty_like(x_token)
+        npu_causal_conv1d_update(
+            x=x_token,
+            conv_state=conv_state,
+            weight=npu_weight,
+            bias=bias,
+            activation=npu_activation,
+            conv_state_indices=write_idx[:, token_index].to(torch.int32),
+            null_block_id=0,
+            out=out_token,
+        )
+        output_tokens.append(out_token)
+
+    out = torch.stack(output_tokens, dim=-1)
+    if squeeze_token_axis:
+        out = out.squeeze(-1)
+    return out.to(original_dtype)
+
+
 def _activation_mode(activation: Union[bool, str, None]) -> int:
     if activation is None or activation is False:
         return 0
@@ -406,9 +470,9 @@ def causal_conv1d_update(
     AscendC operator (note the different contract from ``causal_conv1d_fn``,
     which keeps the transposed ``(page, dim, state)`` view).
 
-    Single-token decode runs the device-metadata path shared by eager and
-    aclgraph capture; multi-token speculative decode keeps the host-metadata
-    path (eager only — target-verify never runs inside the decode graph).
+    Single-token decode and multi-token target verify both run the
+    device-metadata path shared by eager and aclgraph capture; the host-metadata
+    fallback below is only reached for non-2-D block maps.
     """
 
     if seq_size_per_block <= 0:
@@ -432,14 +496,25 @@ def causal_conv1d_update(
     if weight.dim() != 2 or weight.shape[0] != dim:
         raise ValueError("weight must have shape (dim, width)")
 
-    # Standard decode (one token per sequence): device-metadata path.
-    if (
-        token_count == 1
-        and block_map.ndim == 2
-        and block_map.shape[0] == batch
-    ):
-        return _causal_conv1d_update_device(
-            x[:, :, 0],
+    # Device-metadata path shared by single-token decode and multi-token
+    # target verify (K+1 tokens/sequence): no D2H sync, so eager and aclgraph
+    # capture run the identical AscendC implementation.
+    if block_map.ndim == 2 and block_map.shape[0] == batch:
+        if token_count == 1:
+            return _causal_conv1d_update_device(
+                x[:, :, 0],
+                conv_state,
+                weight,
+                bias,
+                activation,
+                block_map,
+                sequence_lengths,
+                int(seq_size_per_block),
+                original_dtype,
+                squeeze_token_axis,
+            )
+        return _causal_conv1d_update_tokens_device(
+            x,
             conv_state,
             weight,
             bias,

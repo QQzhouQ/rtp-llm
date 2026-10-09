@@ -132,6 +132,13 @@ def migrate_state_rows(
         if kernel is not False:
             row_bytes = row_elems * state.element_size()
             tiles = max(1, min(_MAX_TILES, row_bytes // _TILE_BYTES))
+            # The kernel indexes src_ptr/dst_ptr with a stride-1 row offset, so
+            # strided views (e.g. write_idx[:, token] column slices from the
+            # (batch, T) page-index tensor) would be read linearly from the
+            # underlying storage — wrong page ids. Materialize contiguous
+            # [rows] index tensors first ([batch] int32, negligible cost).
+            src_pages = src_pages.contiguous()
+            dst_pages = dst_pages.contiguous()
             kernel[(rows, tiles)](
                 state,
                 src_pages.to(torch.int32),

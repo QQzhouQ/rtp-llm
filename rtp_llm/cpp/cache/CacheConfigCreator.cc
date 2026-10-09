@@ -414,6 +414,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
         int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // G9 (PR #64): cap modules at the draft model's layer count —
+        // MtpExecutor uses module 0 exclusively and Qwen3.5's single MTP layer
+        // is reused across all K proposal steps; allocating K modules would
+        // waste (K - draft_layer_num) * draft_layer_num layers of KV budget.
+        num_mtp_modules = std::min(num_mtp_modules, static_cast<int>(draft.layer_num));
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
