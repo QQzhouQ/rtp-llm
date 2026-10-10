@@ -255,10 +255,6 @@ def fused_recurrent_gated_delta_rule(
             "block_map and sequence_lengths"
         )
     if initial_state is None:
-        raise ValueError("initial_state is reqcend recurrent decode uses "
-            "block_map and sequence_lengths"
-        )
-    if initial_state is None:
         raise ValueError("initial_state is required for recurrent decode")
     if not inplace_final_state:
         raise NotImplementedError(
