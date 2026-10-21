@@ -109,6 +109,14 @@ class StrategyRegistry:
                 for strategy in strategies
                 if getattr(strategy, "strategy_name", None) == requested
             ]
+        # TEMP DEBUG: dump per-strategy evaluation at startup
+        for _s in strategies:
+            try:
+                _ok = _s.can_handle(config)
+                logger.warning("[TEMP] strategy=%s can_handle=%s skip_reason=%s",
+                               _s.__class__.__name__, _ok, getattr(_s, "skip_reason", None))
+            except Exception as _e:
+                logger.warning("[TEMP] strategy=%s raised=%r", _s.__class__.__name__, _e)
         candidates = [
             strategy for strategy in strategies if strategy.can_handle(config)
         ]

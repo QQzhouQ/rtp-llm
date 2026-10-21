@@ -36,7 +36,9 @@ public:
 
     void           initCapture() override;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool           canRun(const PyModelInputs& inputs,
+                         CudaGraphState&      state,
+                         CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
 
     void setPositionEncoding(torch::Tensor position_encoding) override;
     void setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
@@ -121,6 +123,8 @@ private:
     // Hybrid KV cache
     std::vector<int32_t> kv_cache_layer_to_group_;
     int32_t              kv_cache_group_num_{0};
+    // Tag-based hybrid cache groups (mirrors engine-side AttentionInputsByTag)
+    std::vector<std::string> group_tags_;
 };
 
 }  // namespace rtp_llm

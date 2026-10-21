@@ -68,11 +68,14 @@ class AscendPrefillImpl(FMHAImplBase):
         blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, self.attn_inputs)
         kernel_page = kv_cache.seq_size_per_block if kv_cache is not None else 0
         self.params.blocks_per_phys = blocks_per_phys
-        positions, slot_mapping = compute_ascend_attn_params(
+        positions, slot_mapping, mrope_positions = compute_ascend_attn_params(
             self.attn_inputs, layer_idx, kernel_page * blocks_per_phys
         )
         self.params.positions_d = positions.to(device, non_blocking=True)
         self.params.slot_mapping = slot_mapping.to(device, non_blocking=True)
+        self.params.mrope_positions_d = (
+            mrope_positions.to(device, non_blocking=True) if mrope_positions is not None else None
+        )
 
     def prepare(self, attn_inputs):
         self.fmha_impl.prepare(attn_inputs)
@@ -100,6 +103,10 @@ class AscendPrefillImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
+        from rtp_llm.ops import RopeStyle
+        # MRoPE is handled by AscendRotaryEmbeddingOp (npu_mrope fast path for
+        # non-interleaved, pure-torch for interleaved), so both variants are
+        # accepted here.
         return attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
                torch.npu.is_available()
@@ -135,7 +142,7 @@ class AscendPrefillAttnOp:
         self.params = params
 
     def prepare(self, attn_inputs):
-        self.block_table = attn_inputs.kv_cache_kernel_block_id_host
+        self.block_table = attn_inputs.kv_cache_kernel_block_id
         self.blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, attn_inputs)
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)

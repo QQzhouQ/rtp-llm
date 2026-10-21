@@ -21,6 +21,10 @@ class AscendAttnParams:
     block_size: int = 128
     scale: float = 1.0
     positions_d: Optional[torch.Tensor] = None  # RoPE position IDs (device tensor)
+    # MRoPE three-axis (t/h/w) position IDs [num_tokens, 3] (device tensor).
+    # Populated from combo_position_ids when the model uses MROPE-style
+    # position generation; text-only requests carry identical rows.
+    mrope_positions_d: Optional[torch.Tensor] = None
     # Kernel blocks per physical block; >1 when the attention kernel needs a
     # finer block granularity than the allocated KV block.
     blocks_per_phys: int = 1
@@ -44,8 +48,8 @@ def infer_blocks_per_phys(attn_inputs) -> int:
     block size cannot be read directly.  The kernel table is the physical table
     expanded by that factor, so their widths give the ratio.
     """
-    phys = attn_inputs.kv_cache_block_id_host
-    kernel = attn_inputs.kv_cache_kernel_block_id_host
+    phys = attn_inputs.kv_cache_block_id
+    kernel = attn_inputs.kv_cache_kernel_block_id
     if phys is None or kernel is None or phys.numel() == 0 or kernel.numel() == 0:
         return 1
     phys_cols = int(phys.shape[-1])
@@ -76,7 +80,7 @@ def build_ascend_params(attn_inputs, page_size: int) -> AscendAttnParams:
     """Build AscendAttnParams from PyAttentionInputs."""
     params = AscendAttnParams()
 
-    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)
+    params.block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)
 
     if attn_inputs.sequence_lengths.numel() > 0:
         params.seq_lens = attn_inputs.prefix_lengths + attn_inputs.input_lengths
@@ -107,7 +111,7 @@ def compute_ascend_attn_params(attn_inputs, layer_idx: int = 0, phys_page_size: 
             - prefix_lengths: [B] int32 (CPU or NPU)
             - input_lengths: [B] int32 (CPU or NPU)
             - sequence_lengths: [B] int32 (CPU or NPU)
-            - kv_cache_block_id_host: [B, max_blocks] int32 (CPU)
+            - kv_cache_block_id: [B, max_blocks] int32 (CPU)
             - kv_cache: object with seq_size_per_block
 
     Returns:
@@ -115,14 +119,10 @@ def compute_ascend_attn_params(attn_inputs, layer_idx: int = 0, phys_page_size: 
         slot_mapping: [num_tokens] int64, CPU
     """
     is_prefill = attn_inputs.is_prefill
-    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id_host)  # always on CPU
-    # Hybrid models (e.g. Qwen3.5) carry one physical block table per cache
-    # group, stacked as [group, batch, max_blocks]; select this layer's group.
-    if block_table is not None and block_table.dim() == 3:
-        gid = 0
-        if attn_inputs.kv_cache_layer_to_group is not None:
-            gid = int(attn_inputs.kv_cache_layer_to_group[layer_idx].item())
-        block_table = block_table[gid]
+    block_table = _squeeze_block_table(attn_inputs.kv_cache_block_id)  # always on CPU
+    # Hybrid models: with the tag-based cache layout the engine already splits
+    # per-group inputs (each PyAttentionInputs carries this group's 2-D table),
+    # so no [group, batch, blocks] selection is needed here anymore.
     # slot_mapping indexes the physical block storage, so it must use the
     # physical block size.  attn_inputs.kv_cache is not populated here, hence
     # the caller passes the size it derived from the block tables.
@@ -162,4 +162,18 @@ def compute_ascend_attn_params(attn_inputs, layer_idx: int = 0, phys_page_size: 
     else:
         slot_mapping = torch.empty(0, dtype=torch.int64)
 
-    return positions, slot_mapping
+    # MRoPE positions: the engine (PositionIdsGenerator MROPE style) provides
+    # combo_position_ids [num_tokens, 3]; text-only requests degenerate to
+    # identical rows (standard sequential positions). slot_mapping above keeps
+    # using the 1-D seq positions — KV slot addressing is independent of the
+    # RoPE axis layout.
+    mrope_positions = None
+    combo_position_ids = getattr(attn_inputs, "combo_position_ids", None)
+    if combo_position_ids is not None and combo_position_ids.numel() > 0:
+        if combo_position_ids.dim() == 1:
+            # index_factor=3 flat layout [T*3] -> [T, 3]
+            combo_position_ids = combo_position_ids.reshape(-1, 3)
+        if combo_position_ids.dim() == 2 and combo_position_ids.size(1) == 3:
+            mrope_positions = combo_position_ids.to(torch.int64)
+
+    return positions, slot_mapping, mrope_positions

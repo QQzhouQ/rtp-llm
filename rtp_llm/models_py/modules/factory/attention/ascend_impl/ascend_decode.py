@@ -76,14 +76,17 @@ class AscendDecodeImpl(FMHAImplBase):
         if getattr(self.attn_inputs, "is_cuda_graph", False):
             self._update_rope_kv_write_params_device(device, kernel_page, blocks_per_phys)
             return
-        positions, slot_mapping = compute_ascend_attn_params(
+        positions, slot_mapping, mrope_positions = compute_ascend_attn_params(
             self.attn_inputs, layer_idx, kernel_page * blocks_per_phys
         )
         self.params.positions_d = positions.to(device, non_blocking=True)
         self.params.slot_mapping = slot_mapping.to(device, non_blocking=True)
+        self.params.mrope_positions_d = (
+            mrope_positions.to(device, non_blocking=True) if mrope_positions is not None else None
+        )
 
     def _update_rope_kv_write_params_device(self, device, kernel_page, blocks_per_phys):
-        seq_lens_plus_1 = self.attn_inputs.sequence_lengths_plus_1_d
+        seq_lens_plus_1 = self.attn_inputs.sequence_lengths_plus_1_device
         positions_d = seq_lens_plus_1 - 1
 
         block_table = self.attn_inputs.kv_cache_kernel_block_id_device
@@ -109,6 +112,16 @@ class AscendDecodeImpl(FMHAImplBase):
 
         self.params.positions_d = positions_d
         self.params.slot_mapping = slot_mapping
+        # Graph-mode MRoPE: read the three-axis positions from the captured
+        # combo_position_ids buffer ([T*3] flat on device) when present.
+        combo = getattr(self.attn_inputs, "combo_position_ids", None)
+        if combo is not None and combo.numel() > 0:
+            if combo.dim() == 1:
+                combo = combo.reshape(-1, 3)
+            if combo.dim() == 2 and combo.size(1) == 3:
+                self.params.mrope_positions_d = combo.to(torch.int64)
+                return
+        self.params.mrope_positions_d = None
 
     def prepare(self, attn_inputs):
         self.fmha_impl.prepare(attn_inputs)
@@ -155,7 +168,7 @@ class AscendDecodeImpl(FMHAImplBase):
             q = qkv.chunk(3, dim=-1)[0]
 
         if is_graph:
-            self.fmha_impl.context_lens = self.attn_inputs.sequence_lengths_plus_1_d
+            self.fmha_impl.context_lens = self.attn_inputs.sequence_lengths_plus_1_device
         else:
             self.fmha_impl.context_lens = self.attn_inputs.sequence_lengths + 1
 
@@ -166,6 +179,10 @@ class AscendDecodeImpl(FMHAImplBase):
 
     @staticmethod
     def support(attn_configs, attn_inputs):
+        from rtp_llm.ops import RopeStyle
+        # MRoPE is handled by AscendRotaryEmbeddingOp (npu_mrope fast path for
+        # non-interleaved, pure-torch for interleaved), so both variants are
+        # accepted here.
         return not attn_inputs.is_prefill and \
                not attn_configs.use_mla and \
                torch.npu.is_available()
@@ -225,20 +242,16 @@ class AscendDecodeAttnOp:
             if self.block_table is not None:
                 if self.block_table.ndim != 2:
                     self.block_table = self.block_table.reshape(-1, self.block_table.shape[-1])
-            if attn_inputs.sequence_lengths_plus_1_d.numel() > 0:
-                self.context_lens = attn_inputs.sequence_lengths_plus_1_d
-            else:
-                self.context_lens = None
+            seq_plus1 = attn_inputs.sequence_lengths_plus_1_device
+            self.context_lens = seq_plus1 if (seq_plus1 is not None and seq_plus1.numel() > 0) else None
             return
-        self.block_table = attn_inputs.kv_cache_kernel_block_id_host
+        self.block_table = attn_inputs.kv_cache_kernel_block_id
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:
                 self.block_table = self.block_table.reshape(-1, self.block_table.shape[-1])
-        if attn_inputs.sequence_lengths.numel() > 0:
-            self.context_lens = attn_inputs.sequence_lengths + 1
-        else:
-            self.context_lens = None
+        seq = attn_inputs.sequence_lengths
+        self.context_lens = (seq + 1) if (seq is not None and seq.numel() > 0) else None
 
     def forward(self, q, kv_cache, use_graph=False):
         block_table = self.block_table

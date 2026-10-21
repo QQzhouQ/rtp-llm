@@ -611,6 +611,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 const auto& topology = params.kv_cache_layer_layout->topology();
                 const auto& tags     = topology.groupTags();
                 graph_params.kv_cache_group_num = static_cast<int32_t>(tags.size());
+                graph_params.kv_cache_group_tags = tags;
                 if (!topology.groups().empty()) {
                     graph_params.tokens_per_block        = static_cast<int>(topology.groups().front().seqSizePerBlock());
                     graph_params.kernel_tokens_per_block = static_cast<int>(topology.groups().front().kernelSeqSizePerBlock());
@@ -639,6 +640,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
             graph_runner_.reset(new AscendGraphRunner(graph_params, py_instance));
             RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper (Ascend)");
+            // Mirror the CUDA path: run the Python model initialize (prepares
+            // capture-time model state) and capture the decode graphs now —
+            // without initCapture every forward falls back to eager.
+            auto py_initialize_method = py_instance.attr("initialize");
+            py_init_result = py_initialize_method(init_resources);
+            graph_runner_->initCapture();
         }
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP/ACL Graph is only supported on CUDA/ROCm/Ascend platform");

@@ -74,7 +74,7 @@ pip_parse(
     name = "pip_dsv4_test",
     requirements_lock = "//rtp_llm/test/pytest:requirements_lock.txt",
     python_interpreter = "/opt/conda310/bin/python3",
-    extra_pip_args = ["--extra-index-url=https://mirrors.aliyun.com/pypi/simple/"],
+    extra_pip_args = ["--extra-index-url=https://mirrors.cloud.tencent.com/pypi/simple/"],
     timeout = 3600,
 )
 

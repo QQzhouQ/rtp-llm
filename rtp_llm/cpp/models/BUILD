@@ -193,7 +193,6 @@ cc_library(
         "//conditions:default": [],
     }) + [
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
-    ],
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": [

@@ -16,8 +16,12 @@
 
 #if USING_ASCEND
 #include <acl/acl.h>
+// CANN's acl_sk.h (pulled in via NPUGraph.h) contains a nameless
+// "typedef struct {...};" which is a benign -Wpedantic warning under gcc;
+// -Werror would turn it fatal (also downgraded in the BUILD copts).
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <torch_npu/csrc/core/npu/NPUGraph.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/NPUFunctions.h>

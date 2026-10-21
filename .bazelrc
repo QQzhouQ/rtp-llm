@@ -197,6 +197,8 @@ build:ascend --linkopt="-lhccl"
 build:ascend --copt=-Wno-deprecated-declarations
 build:ascend --copt="-Wno-error=unused-result"
 build:ascend --copt="-Wno-error=array-bounds"
+# CANN acl_sk.h emits a flagless "typedef was ignored" warning; keep non-fatal
+build:ascend --copt="-Wno-error"
 build:ascend --copt=-Wno-tautological-compare
 build:ascend --copt=-Wno-array-parameter
 build:ascend --copt=-Wno-unused-variable

@@ -45,7 +45,8 @@ AscendGraphRunner::AscendGraphRunner(const GraphParams& graph_params, py::object
 #endif
     forward_event_(ascend_graph::makeGraphEvent()),
     kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-    kv_cache_group_num_(graph_params.kv_cache_group_num) {
+    kv_cache_group_num_(graph_params.kv_cache_group_num),
+    group_tags_(graph_params.kv_cache_group_tags) {
     if (kernel_seq_size_per_block_ <= 0) {
         throw std::runtime_error("AscendGraphRunner constructor: kernel_tokens_per_block must be > 0.");
     }
@@ -169,7 +170,7 @@ bool AscendGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inpu
     return true;
 }
 
-bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
+bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state, CudaGraphCheckMode mode) {
     RTP_LLM_PROFILE_SCOPE("ascend_graph.canRun");
 
     // Speculative decoding: target verify path
@@ -188,9 +189,9 @@ bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& stat
         return false;
     }
 
-    // Hybrid KV cache group count check
-    if (!inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()) {
-        const size_t group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
+    // Hybrid KV cache group count check (tag-based groups)
+    if (!inputs.attention_inputs_by_tag.empty()) {
+        const size_t group = inputs.attention_inputs_by_tag.size();
         if (kv_cache_group_num_ <= 0) {
             RTP_LLM_LOG_WARNING("Hybrid kv cache detected but kv_cache_group_num_ is not set, fallback to normal run.");
             return false;
@@ -219,7 +220,7 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
     // input_lengths [batch_size, int32] pinned host
     inputs.attention_inputs.input_lengths =
         torch::full({int(max_bs_)}, num_tokens_per_bs, options_cpu_int32_).pin_memory();
-    inputs.attention_inputs.input_lengths_d = inputs.attention_inputs.input_lengths.to(options_npu_int32_.device());
+    inputs.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths.to(options_npu_int32_.device());
     // sequence_lengths [batch_size, int32] pinned host
     // Use page_size as capture context_len: covers typical short prompts,
     // keeps ATB workspace small, avoids copy_stream sync with large ctx.
@@ -236,46 +237,21 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
     // reject non-positive state pages during warmup/capture.
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
-    inputs.attention_inputs.kv_cache_kernel_block_id_host =
+    inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
-    // compute_ascend_attn_params() reads kv_cache_block_id_host (not the kernel
+    // compute_ascend_attn_params() reads kv_cache_block_id (not the kernel
     // variant) to derive slot_mapping. Allocate it alongside the kernel version
     // so the capture warmup forward produces a non-empty slot_mapping instead
     // of crashing npu_scatter_pa_kv_cache with a size mismatch.
     inputs.attention_inputs.kv_cache_block_id_device =
         torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
-    inputs.attention_inputs.kv_cache_block_id_host =
+    inputs.attention_inputs.kv_cache_block_id =
         torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
-
-    const auto layer_num = kv_cache_layer_to_group_.size();
-    if (layer_num > 0) {
-        auto kv_cache_layer_to_group_capture_ =
-            torch::empty({static_cast<int64_t>(layer_num)}, options_cpu_int32_).pin_memory();
-        auto* dst = kv_cache_layer_to_group_capture_.data_ptr<int32_t>();
-        for (size_t i = 0; i < layer_num; ++i) {
-            dst[i] = static_cast<int32_t>(kv_cache_layer_to_group_[i]);
-        }
-        inputs.attention_inputs.kv_cache_layer_to_group = kv_cache_layer_to_group_capture_;
-    }
-
-    // Hybrid cache: per-group block tables
-    inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.clear();
-    if (kv_cache_group_num_ > 1) {
-        inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.reserve(kv_cache_group_num_);
-        inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.reserve(kv_cache_group_num_);
-        for (int g = 0; g < kv_cache_group_num_; ++g) {
-            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.push_back(
-                torch::ones({int(max_bs_), max_blocks}, options_npu_int32_));
-            inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
-                torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory());
-        }
-    }
 
     if (num_tokens_per_bs_ > 1) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
-        inputs.attention_inputs.prefix_lengths_d = inputs.attention_inputs.prefix_lengths.to(options_npu_int32_.device());
+        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.to(options_npu_int32_.device());
     } else {
         inputs.attention_inputs.prefix_lengths   = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
@@ -283,8 +259,32 @@ void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int ma
     inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
-    inputs.attention_inputs.sequence_lengths_plus_1_d = torch::full({int(max_bs_)}, seq_size_per_block_, options_npu_int32_);
-    inputs.attention_inputs.decode_cu_seqlens_d       = torch::arange(0, max_bs_ + 1, 1, options_npu_int32_);
+    inputs.attention_inputs.sequence_lengths_plus_1_device = torch::full({int(max_bs_)}, seq_size_per_block_, options_npu_int32_);
+    inputs.attention_inputs.decode_cu_seqlens_device       = torch::arange(0, max_bs_ + 1, 1, options_npu_int32_);
+    // MRoPE capture buffer: [max_token * 3] flat three-axis positions (t/h/w
+    // sections), zero-filled like the other capture seeds. The eager path
+    // builds real positions per step; replay refreshes via copyTensorSlice.
+    inputs.attention_inputs.combo_position_ids =
+        torch::zeros({max_num_token_ * 3}, options_npu_int32_);
+
+    // Hybrid cache: per-tag block tables. Built LAST so the group copies
+    // inherit every default field above (sequence_lengths_plus_1_device
+    // etc.) — the GDN layer reads these through its LINEAR group's inputs.
+    inputs.attention_inputs_by_tag.clear();
+    if (kv_cache_group_num_ > 1 && !group_tags_.empty()) {
+        for (const auto& tag : group_tags_) {
+            PyAttentionInputs group_inputs          = inputs.attention_inputs;
+            group_inputs.kv_cache_kernel_block_id_device =
+                torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
+            group_inputs.kv_cache_kernel_block_id =
+                torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+            group_inputs.kv_cache_block_id_device =
+                torch::ones({int(max_bs_), max_blocks}, options_npu_int32_);
+            group_inputs.kv_cache_block_id =
+                torch::ones({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+            inputs.attention_inputs_by_tag.emplace(tag, std::move(group_inputs));
+        }
+    }
 }
 
 void AscendGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs,
@@ -302,18 +302,18 @@ void AscendGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs,
 void AscendGraphRunner::initKernelInternalMemory() {
     torch::Tensor cu_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
-    torch::Tensor cu_kv_seqlens =
+    torch::Tensor cu_kv_seqlens_device =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
     auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
     auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
 
     cu_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.cumsum(0);
     if (prefix_lengths.defined() && prefix_lengths.size(0) > 0) {
-        cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
+        cu_kv_seqlens_device.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
     }
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host = cu_seqlens;
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens      = cu_seqlens.to(options_npu_int32_.device());
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens   = cu_kv_seqlens.to(options_npu_int32_.device());
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens        = cu_seqlens;
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_device = cu_seqlens.to(options_npu_int32_.device());
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens_device   = cu_kv_seqlens_device.to(options_npu_int32_.device());
 }
 
 void AscendGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int num_tokens) {
@@ -323,12 +323,12 @@ void AscendGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_si
     inputs.input_ids     = cap.input_ids.slice(0, 0, num_tokens);
     inputs.input_hiddens = cap.input_hiddens.slice(0, 0, num_tokens);
     inputs.attention_inputs.input_lengths    = cap.attention_inputs.input_lengths.slice(0, 0, batch_size);
-    inputs.attention_inputs.input_lengths_d  = cap.attention_inputs.input_lengths_d.slice(0, 0, batch_size);
+    inputs.attention_inputs.input_lengths_device  = cap.attention_inputs.input_lengths_device.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset   = cap.attention_inputs.padding_offset.slice(0, 0, num_tokens);
 
     if (cap.attention_inputs.prefix_lengths.defined() && cap.attention_inputs.prefix_lengths.size(0) > 0) {
         inputs.attention_inputs.prefix_lengths   = cap.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
-        inputs.attention_inputs.prefix_lengths_d = cap.attention_inputs.prefix_lengths_d.slice(0, 0, batch_size);
+        inputs.attention_inputs.prefix_lengths_device = cap.attention_inputs.prefix_lengths_device.slice(0, 0, batch_size);
     } else {
         inputs.attention_inputs.prefix_lengths = cap.attention_inputs.prefix_lengths;
     }
@@ -336,42 +336,43 @@ void AscendGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_si
         cap.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         cap.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);
-    inputs.attention_inputs.kv_cache_kernel_block_id_host =
-        cap.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, batch_size);
+    inputs.attention_inputs.kv_cache_kernel_block_id =
+        cap.attention_inputs.kv_cache_kernel_block_id.slice(0, 0, batch_size);
     inputs.attention_inputs.kv_cache_block_id_device =
         cap.attention_inputs.kv_cache_block_id_device.defined() ?
             cap.attention_inputs.kv_cache_block_id_device.slice(0, 0, batch_size) :
             torch::Tensor();
-    inputs.attention_inputs.kv_cache_block_id_host =
-        cap.attention_inputs.kv_cache_block_id_host.defined() ?
-            cap.attention_inputs.kv_cache_block_id_host.slice(0, 0, batch_size) :
+    inputs.attention_inputs.kv_cache_block_id =
+        cap.attention_inputs.kv_cache_block_id.defined() ?
+            cap.attention_inputs.kv_cache_block_id.slice(0, 0, batch_size) :
             torch::Tensor();
-    inputs.attention_inputs.cu_seqlens_host = cap.attention_inputs.cu_seqlens_host.slice(0, 0, batch_size + 1);
-    inputs.attention_inputs.cu_seqlens      = cap.attention_inputs.cu_seqlens.slice(0, 0, batch_size + 1);
-    inputs.attention_inputs.cu_kv_seqlens   = cap.attention_inputs.cu_kv_seqlens.slice(0, 0, batch_size + 1);
-    inputs.attention_inputs.decode_cu_seqlens_d =
-        cap.attention_inputs.decode_cu_seqlens_d.slice(0, 0, batch_size + 1);
-    inputs.attention_inputs.sequence_lengths_plus_1_d =
-        cap.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
+    inputs.attention_inputs.cu_seqlens        = cap.attention_inputs.cu_seqlens.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.cu_seqlens_device = cap.attention_inputs.cu_seqlens_device.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.cu_kv_seqlens_device   = cap.attention_inputs.cu_kv_seqlens_device.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.decode_cu_seqlens_device =
+        cap.attention_inputs.decode_cu_seqlens_device.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.sequence_lengths_plus_1_device =
+        cap.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, batch_size);
 
-    inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.clear();
-    if (!cap.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-        && !cap.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty()) {
-        const size_t group = cap.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-        inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
-        inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.reserve(group);
-        for (size_t g = 0; g < group; ++g) {
-            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.push_back(
-                cap.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].slice(0, 0, batch_size));
-            inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
-                cap.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].slice(0, 0, batch_size));
+    // Hybrid cache: per-tag block tables sliced to the capture batch size.
+    inputs.attention_inputs_by_tag.clear();
+    if (!cap.attention_inputs_by_tag.empty()) {
+        for (const auto& [tag, cap_group] : cap.attention_inputs_by_tag) {
+            PyAttentionInputs group_inputs = cap_group;
+            group_inputs.kv_cache_kernel_block_id_device =
+                cap_group.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);
+            group_inputs.kv_cache_kernel_block_id =
+                cap_group.kv_cache_kernel_block_id.slice(0, 0, batch_size);
+            group_inputs.kv_cache_block_id_device =
+                cap_group.kv_cache_block_id_device.slice(0, 0, batch_size);
+            group_inputs.kv_cache_block_id =
+                cap_group.kv_cache_block_id.slice(0, 0, batch_size);
+            inputs.attention_inputs_by_tag.emplace(tag, std::move(group_inputs));
         }
     }
 
-    inputs.attention_inputs.dtype                 = cap.attention_inputs.dtype;
-    inputs.attention_inputs.kv_cache_layer_to_group = cap.attention_inputs.kv_cache_layer_to_group;
-    inputs.bert_embedding_inputs                  = cap.bert_embedding_inputs;
+    inputs.attention_inputs.dtype        = cap.attention_inputs.dtype;
+    inputs.bert_embedding_inputs         = cap.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded           = true;
 }
 
@@ -593,16 +594,20 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     // Block tables must be cleared before each replay to prevent stale KV cache
     // block IDs from polluting subsequent batches (same rationale as CudaGraphRunner).
     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
-    py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host.fill_(0);
+    py_model_inputs.attention_inputs.kv_cache_kernel_block_id.fill_(0);
     if (py_model_inputs.attention_inputs.kv_cache_block_id_device.defined())
         py_model_inputs.attention_inputs.kv_cache_block_id_device.fill_(0);
-    if (py_model_inputs.attention_inputs.kv_cache_block_id_host.defined())
-        py_model_inputs.attention_inputs.kv_cache_block_id_host.fill_(0);
-    for (auto& tbl_d : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group) {
-        tbl_d.fill_(0);
-    }
-    for (auto& tbl_h : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group) {
-        tbl_h.fill_(0);
+    if (py_model_inputs.attention_inputs.kv_cache_block_id.defined())
+        py_model_inputs.attention_inputs.kv_cache_block_id.fill_(0);
+    for (auto& [tag, cap_group] : py_model_inputs.attention_inputs_by_tag) {
+        if (cap_group.kv_cache_kernel_block_id_device.defined())
+            cap_group.kv_cache_kernel_block_id_device.fill_(0);
+        if (cap_group.kv_cache_block_id_device.defined())
+            cap_group.kv_cache_block_id_device.fill_(0);
+        if (cap_group.kv_cache_kernel_block_id.defined())
+            cap_group.kv_cache_kernel_block_id.fill_(0);
+        if (cap_group.kv_cache_block_id.defined())
+            cap_group.kv_cache_block_id.fill_(0);
     }
 
     const int token_num = inputs.input_ids.size(0);
@@ -613,38 +618,50 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         py_model_inputs.input_hiddens.slice(0, 0, token_num).copy_(inputs.input_hiddens, /*non_blocking=*/true);
     }
     copyTensorSlice(inputs.attention_inputs.cu_seqlens, py_model_inputs.attention_inputs.cu_seqlens);
-    copyTensorSlice(inputs.attention_inputs.cu_kv_seqlens, py_model_inputs.attention_inputs.cu_kv_seqlens);
-    copyTensorSlice(inputs.attention_inputs.input_lengths_d, py_model_inputs.attention_inputs.input_lengths_d);
+    copyTensorSlice(inputs.attention_inputs.cu_kv_seqlens_device, py_model_inputs.attention_inputs.cu_kv_seqlens_device);
+    copyTensorSlice(inputs.attention_inputs.input_lengths_device, py_model_inputs.attention_inputs.input_lengths_device);
     copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                     py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
     copyTensorSlice(inputs.attention_inputs.kv_cache_block_id_device,
                     py_model_inputs.attention_inputs.kv_cache_block_id_device);
 
     // Decode-only fields
-    copyTensorSlice(inputs.attention_inputs.prefix_lengths_d, py_model_inputs.attention_inputs.prefix_lengths_d);
-    copyTensorSlice(inputs.attention_inputs.sequence_lengths_plus_1_d,
-                    py_model_inputs.attention_inputs.sequence_lengths_plus_1_d);
-    copyTensorSlice(inputs.attention_inputs.decode_cu_seqlens_d,
-                    py_model_inputs.attention_inputs.decode_cu_seqlens_d);
+    copyTensorSlice(inputs.attention_inputs.prefix_lengths_device, py_model_inputs.attention_inputs.prefix_lengths_device);
+    copyTensorSlice(inputs.attention_inputs.sequence_lengths_plus_1_device,
+                    py_model_inputs.attention_inputs.sequence_lengths_plus_1_device);
+    copyTensorSlice(inputs.attention_inputs.decode_cu_seqlens_device,
+                    py_model_inputs.attention_inputs.decode_cu_seqlens_device);
+    // MRoPE: refresh the captured three-axis positions (engine-built combo).
+    if (inputs.attention_inputs.combo_position_ids.defined()
+        && py_model_inputs.attention_inputs.combo_position_ids.defined()) {
+        copyTensorSlice(inputs.attention_inputs.combo_position_ids,
+                        py_model_inputs.attention_inputs.combo_position_ids);
+    }
 
     // Hybrid cache per-group device block tables
-    const bool has_hybrid_cache = !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-                                  && !py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty();
+    const bool has_hybrid_cache = !inputs.attention_inputs_by_tag.empty()
+                                  && !py_model_inputs.attention_inputs_by_tag.empty();
     if (has_hybrid_cache) {
-        const size_t group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
         RTP_LLM_CHECK_WITH_INFO(
-            group == py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
-            "ascend graph: kv_cache_kernel_block_id_device_by_group size mismatch");
-        for (size_t g = 0; g < group; ++g) {
-            copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
-                            py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
+            inputs.attention_inputs_by_tag.size() == py_model_inputs.attention_inputs_by_tag.size(),
+            "ascend graph: hybrid cache group count mismatch");
+        for (auto& [tag, cap_group] : py_model_inputs.attention_inputs_by_tag) {
+            auto it = inputs.attention_inputs_by_tag.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(it != inputs.attention_inputs_by_tag.end(),
+                                    "ascend graph: capture buffer missing group tag=%s",
+                                    tag.c_str());
+            // Device tables (D2D): kernel + physical
+            copyTensorSlice(it->second.kv_cache_kernel_block_id_device,
+                            cap_group.kv_cache_kernel_block_id_device);
+            copyTensorSlice(it->second.kv_cache_block_id_device,
+                            cap_group.kv_cache_block_id_device);
         }
     }
 
     // -------- Host tensors (H2H, pinned memory) --------
-    if (inputs.attention_inputs.cu_seqlens_host.defined()) {
-        auto src = inputs.attention_inputs.cu_seqlens_host.slice(0, 0, state.current_batch_size + 1);
-        py_model_inputs.attention_inputs.cu_seqlens_host.slice(0, 0, state.current_batch_size + 1).copy_(src);
+    if (inputs.attention_inputs.cu_seqlens.defined()) {
+        auto src = inputs.attention_inputs.cu_seqlens.slice(0, 0, state.current_batch_size + 1);
+        py_model_inputs.attention_inputs.cu_seqlens.slice(0, 0, state.current_batch_size + 1).copy_(src);
     }
     if (inputs.attention_inputs.input_lengths.defined()) {
         auto src = inputs.attention_inputs.input_lengths.slice(0, 0, state.current_batch_size);
@@ -655,14 +672,20 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         py_model_inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).copy_(src);
     }
     // Host block tables (Ascend attention reads the host version)
-    copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_host,
-                    py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host);
-    copyTensorSlice(inputs.attention_inputs.kv_cache_block_id_host,
-                    py_model_inputs.attention_inputs.kv_cache_block_id_host);
-    if (inputs.attention_inputs.kv_cache_layer_to_group.defined()
-        && inputs.attention_inputs.kv_cache_layer_to_group.numel() > 0) {
-        py_model_inputs.attention_inputs.kv_cache_layer_to_group.copy_(
-            inputs.attention_inputs.kv_cache_layer_to_group);
+    copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id,
+                    py_model_inputs.attention_inputs.kv_cache_kernel_block_id);
+    copyTensorSlice(inputs.attention_inputs.kv_cache_block_id,
+                    py_model_inputs.attention_inputs.kv_cache_block_id);
+    // Hybrid cache per-group host block tables (H2H)
+    if (has_hybrid_cache) {
+        for (auto& [tag, cap_group] : py_model_inputs.attention_inputs_by_tag) {
+            auto it = inputs.attention_inputs_by_tag.find(tag);
+            if (it == inputs.attention_inputs_by_tag.end()) {
+                continue;
+            }
+            copyTensorSlice(it->second.kv_cache_kernel_block_id, cap_group.kv_cache_kernel_block_id);
+            copyTensorSlice(it->second.kv_cache_block_id, cap_group.kv_cache_block_id);
+        }
     }
     if (inputs.attention_inputs.sequence_lengths.defined()) {
         auto src = inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size);
@@ -670,50 +693,45 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
     }
     py_model_inputs.attention_inputs.context_total_kv_length =
         inputs.attention_inputs.context_total_kv_length;
-    // Hybrid cache per-group host block tables
-    if (has_hybrid_cache) {
-        const size_t group = inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.size();
-        for (size_t g = 0; g < group; ++g) {
-            copyTensorSlice(inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group[g],
-                            py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group[g]);
-        }
-    }
-
     // -------- Padding region clear (batch < max) --------
     if (state.current_batch_size < static_cast<int>(max_bs_)) {
         py_model_inputs.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
-        py_model_inputs.attention_inputs.input_lengths_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
+        py_model_inputs.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
-        py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
-        py_model_inputs.attention_inputs.decode_cu_seqlens_d.slice(0, state.current_batch_size + 1, max_bs_ + 1).fill_(0);
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
+        py_model_inputs.attention_inputs.decode_cu_seqlens_device.slice(0, state.current_batch_size + 1, max_bs_ + 1).fill_(0);
         if (py_model_inputs.attention_inputs.prefix_lengths.defined()
             && py_model_inputs.attention_inputs.prefix_lengths.numel() > 0) {
             py_model_inputs.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
-        if (py_model_inputs.attention_inputs.prefix_lengths_d.defined()
-            && py_model_inputs.attention_inputs.prefix_lengths_d.numel() > 0) {
-            py_model_inputs.attention_inputs.prefix_lengths_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
+        if (py_model_inputs.attention_inputs.prefix_lengths_device.defined()
+            && py_model_inputs.attention_inputs.prefix_lengths_device.numel() > 0) {
+            py_model_inputs.attention_inputs.prefix_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device.slice(
             0, state.current_batch_size, max_bs_).fill_(0);
-        py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host.slice(
+        py_model_inputs.attention_inputs.kv_cache_kernel_block_id.slice(
             0, state.current_batch_size, max_bs_).fill_(0);
         if (py_model_inputs.attention_inputs.kv_cache_block_id_device.defined())
             py_model_inputs.attention_inputs.kv_cache_block_id_device.slice(
                 0, state.current_batch_size, max_bs_).fill_(0);
-        if (py_model_inputs.attention_inputs.kv_cache_block_id_host.defined())
-            py_model_inputs.attention_inputs.kv_cache_block_id_host.slice(
+        if (py_model_inputs.attention_inputs.kv_cache_block_id.defined())
+            py_model_inputs.attention_inputs.kv_cache_block_id.slice(
                 0, state.current_batch_size, max_bs_).fill_(0);
-        for (auto& tbl_d : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group) {
-            tbl_d.slice(0, state.current_batch_size, max_bs_).fill_(0);
-        }
-        for (auto& tbl_h : py_model_inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group) {
-            tbl_h.slice(0, state.current_batch_size, max_bs_).fill_(0);
+        for (auto& [tag, cap_group] : py_model_inputs.attention_inputs_by_tag) {
+            if (cap_group.kv_cache_kernel_block_id_device.defined())
+                cap_group.kv_cache_kernel_block_id_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            if (cap_group.kv_cache_block_id_device.defined())
+                cap_group.kv_cache_block_id_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            if (cap_group.kv_cache_kernel_block_id.defined())
+                cap_group.kv_cache_kernel_block_id.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            if (cap_group.kv_cache_block_id.defined())
+                cap_group.kv_cache_block_id.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
     }
 
-    // Compute sequence_lengths_plus_1_d from sequence_lengths (engine doesn't populate it)
-    py_model_inputs.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, state.current_batch_size) =
+    // Compute sequence_lengths_plus_1_device from sequence_lengths (engine doesn't populate it)
+    py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, state.current_batch_size) =
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
             .to(options_npu_int32_.device()) + 1;
 

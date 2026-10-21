@@ -49,7 +49,13 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    copts = copts(),
+    # CANN's acl_sk.h contains a nameless "typedef struct {...};" that emits
+    # a flagless gcc warning (cannot be disabled per-flag); keep warnings
+    # non-fatal for this target.
+    copts = copts() + select({
+        "@//:using_ascend": ["-Wno-error"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

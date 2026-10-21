@@ -1,9 +1,12 @@
 """Ascend MoE placeholder: rejects all MoE configurations.
 
-No NPU-capable MoE executor exists (Triton is excluded from Ascend deps),
-and Ascend TP (tp_size > 1) is not implemented. MoE models fail fast at
-strategy selection instead of crashing or silently dropping experts. Dense
-(non-MoE) models never reach this path.
+With the CANN MoE pipeline (AscendCannStrategy) registered ahead of this
+placeholder, this fallback only stays as the last-resort guard for configs
+the CANN strategy cannot handle (e.g. quantized MoE). It must reject
+quietly (can_handle -> False) instead of raising: the strategy registry
+evaluates every candidate inside a list comprehension, and an unconditional
+raise here would crash strategy selection even when an earlier strategy
+already matched.
 """
 
 from typing import Any
@@ -18,18 +21,32 @@ class AscendBf16FallbackStrategy(MoeStrategy):
     """Placeholder that rejects all MoE configurations on Ascend."""
 
     _REJECT_MSG = (
-        "Ascend MoE is not supported yet: no NPU-capable MoE executor is "
-        "available (Triton-based executors are excluded from Ascend deps), "
-        "and Ascend TP (tp_size > 1) is not implemented either. MoE models "
-        "are rejected on Ascend; use tp_size=1 dense models or wait for a "
-        "native Ascend MoE executor."
+        "Ascend MoE has no strategy for this configuration (the CANN bf16 "
+        "pipeline rejected it; no other NPU-capable MoE executor exists)."
     )
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        raise ValueError(cls._REJECT_MSG)
+        # Never selected when the CANN strategy accepts the config; reaching
+        # here means no Ascend MoE implementation covers this configuration.
+        # Record the rejection via the checker (no raise: the registry scans
+        # candidates inside a list comprehension).
+        checker.check(False, reason=cls._REJECT_MSG)
 
     def get_attributes(self) -> StrategyAttributes:
-        # Never reached: can_handle calls check_conditions first, which
-        # raises before attributes are consulted.
-        raise RuntimeError(self._REJECT_MSG)
+        # can_handle() consults attributes before check_conditions; a raise
+        # here would escape the registry's candidate scan (it only catches
+        # ImportError). Return a benign marker instead and let
+        # check_conditions reject the config.
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+            MoEConfigAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.routers import (
+            NpuPureTpRouter,
+        )
+
+        return StrategyAttributes(
+            router_class=NpuPureTpRouter,
+            executor_class=None,
+            quant_config=None,
+        )
