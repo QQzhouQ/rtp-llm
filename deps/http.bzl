@@ -91,9 +91,9 @@ def http_deps():
 
     http_archive(
         name = "torch_cpu_ascend",
-        sha256 = "bc78daf29361012904bc64c08f781a2f29d894a395cd984d2ba98a2abc8f9295",
+        sha256 = "bd2a257e670ede9fc01c6d76dccdc473040913b8e9328169bf177dbdc38e2484",
         urls = [
-            "file:///home/d30033799/weishan/rtp-llm-wheels/torch-2.9.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -101,9 +101,9 @@ def http_deps():
 
     http_archive(
         name = "torch_npu_ascend",
-        sha256 = "70217121d5e0034ae90cfd28f972ab66e68816d1b85125584960f8d20ce64fa7",
+        sha256 = "3d436f74af70089b4320e6dae374641ddfb76712cdd593e67763ded33cf31a2a",
         urls = [
-            "file:///home/d30033799/weishan/rtp-llm-wheels/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl"
+            "https://files.pythonhosted.org/packages/78/f3/1e957440f30c48077dceadbe6ad92ec6651628db020a958bdf7ecc00558e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.torch_npu"),
