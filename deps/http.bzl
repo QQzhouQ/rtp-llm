@@ -91,9 +91,9 @@ def http_deps():
 
     http_archive(
         name = "torch_cpu_ascend",
-        sha256 = "d5d42a402647a53cef82af3069113363a7df749320ef622be6f06c71612cbc99",
+        sha256 = "bc78daf29361012904bc64c08f781a2f29d894a395cd984d2ba98a2abc8f9295",
         urls = [
-            "file:///tmp/opencode/torch_cpu_local.zip",
+            "file:///home/d30033799/weishan/rtp-llm-wheels/torch-2.9.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
