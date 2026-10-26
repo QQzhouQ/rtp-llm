@@ -563,62 +563,6 @@ KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& group_tag,
     return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id);
 }
 
-CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
-    CacheLayerLayout layout;
-
-    auto  all_layout        = allocator_->allLayerCacheBase();
-    auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
-    auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
-
-    layout.layer_to_groups.resize(config_.layer_num);
-    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
-    if (!all_scale_tensors.empty()) {
-        layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
-    }
-
-    // config_.layer_to_group_id covers ALL layers (main model + MTP draft
-    // modules, see CacheConfigCreator::createSpConfig). The main-model layout
-    // must expose only the first config_.layer_num entries: callers size their
-    // buffers by layers_to_kv_buffer_ptrs (e.g. MtpExecutor's
-    // target_kv_cache_layer_to_group), and a full-length vector would make
-    // those copies read/write out of bounds.
-    RTP_LLM_CHECK_WITH_INFO(config_.layer_to_group_id.size() >= config_.layer_num,
-                            "layer_to_group_id size [%zu] < main model layer_num [%u]",
-                            config_.layer_to_group_id.size(),
-                            config_.layer_num);
-    layout.layer_to_groups.assign(config_.layer_to_group_id.begin(),
-                                  config_.layer_to_group_id.begin() + config_.layer_num);
-    layout.group_types     = config_.group_types;
-    layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
-
-    RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
-                            "config_.layer_num[%d] > all_layer_tensors.size()[%ld]",
-                            config_.layer_num,
-                            all_layer_tensors.size());
-
-    for (int layer_id = 0; layer_id < static_cast<int>(config_.layer_num); ++layer_id) {
-        if (static_cast<size_t>(layer_id) < all_layer_tensors.size()) {
-            layout.layer_to_groups[layer_id]          = all_layout.layer_to_groups[layer_id];
-            layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
-        } else {
-            RTP_LLM_CHECK(false);
-        }
-
-        if (!all_scale_tensors.empty()) {
-            if (static_cast<size_t>(layer_id) < all_scale_tensors.size()) {
-                layout.layers_to_scale_buffer_ptrs[layer_id] = all_scale_tensors[layer_id];
-            } else {
-                RTP_LLM_CHECK(false);
-            }
-        }
-        if (static_cast<size_t>(layer_id) < config_.layer_attn_types.size()) {
-            layout.layer_attn_types[layer_id] = config_.layer_attn_types[static_cast<size_t>(layer_id)];
-        }
-    }
-
-    return layout;
-}
-}
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {

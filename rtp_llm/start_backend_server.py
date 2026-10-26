@@ -92,16 +92,10 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
-        # Fail-fast at config time: Ascend speculative decoding is not
-        # supported yet (CUDA-only rejection sampling); MtpExecutor also
-        # refuses construction, but failing here is clearest.
-        if is_ascend() and py_env_configs.sp_config.type != SpeculativeType.NONE:
-            raise RuntimeError(
-                f"Speculative decoding (sp_type={py_env_configs.sp_config.type}) is not yet "
-                "supported on Ascend NPU: rejection sampling and MTP device-state kernels "
-                "are CUDA-only. Remove the spec/draft model config on Ascend until the "
-                "migration completes."
-            )
+        # Ascend MTP (PR #64): rejection sampling now has a pure-torch NPU
+        # implementation and the GDN verify kernels are ported — the spec gate
+        # is lifted. MtpExecutor on Ascend keeps the draft model eager
+        # (Phase C draft graphs postponed; see PyWrappedModel).
         # Fail-fast: the device-input publish/check pipeline is CUDA-only; on
         # Ascend it would throw on the first real request and kill the engine
         # loop thread. NormalEngine has a matching C++-side gate.
