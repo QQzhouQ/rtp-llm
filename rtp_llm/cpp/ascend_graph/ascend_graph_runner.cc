@@ -353,12 +353,23 @@ void AscendGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_si
         cap.attention_inputs.decode_cu_seqlens_device.slice(0, 0, batch_size + 1);
     inputs.attention_inputs.sequence_lengths_plus_1_device =
         cap.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, batch_size);
+    // MRoPE three-axis positions: flat [num_tokens * 3] buffer, sliced to
+    // this bucket's token count so the [T,3] reshape matches the batch.
+    inputs.attention_inputs.combo_position_ids =
+        cap.attention_inputs.combo_position_ids.defined() ?
+            cap.attention_inputs.combo_position_ids.slice(0, 0, num_tokens * 3) :
+            torch::Tensor();
 
-    // Hybrid cache: per-tag block tables sliced to the capture batch size.
+    // Hybrid cache: per-tag inputs rebuilt from the batch-sliced DEFAULT
+    // group (so every length/metadata field matches the capture batch size),
+    // then only the per-group block tables are sliced from the capture
+    // buffers. Copying the raw cap group would carry max_bs-sized
+    // sequence_lengths into a smaller-bucket capture and crash the paged
+    // state gather with mismatched row counts.
     inputs.attention_inputs_by_tag.clear();
     if (!cap.attention_inputs_by_tag.empty()) {
         for (const auto& [tag, cap_group] : cap.attention_inputs_by_tag) {
-            PyAttentionInputs group_inputs = cap_group;
+            PyAttentionInputs group_inputs = inputs.attention_inputs;
             group_inputs.kv_cache_kernel_block_id_device =
                 cap_group.kv_cache_kernel_block_id_device.slice(0, 0, batch_size);
             group_inputs.kv_cache_kernel_block_id =
@@ -530,6 +541,42 @@ void AscendGraphRunner::replayDecode(int bs) {
     replayGraph(bs);
 }
 
+
+// Invoke `method` on the attention impl object the model returned from
+// prepare_fmha_impl. Hybrid (tag-based) models return a per-tag dict of impls
+// instead of a single object — fan the call out over the values. The 2-arg
+// overload forwards attn_inputs alongside the graph batch size.
+static void invokeOnAttnImpl(const py::object& attn_pyobj, const char* method, const py::object& arg) {
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        for (auto value : attn_pyobj.attr("values")()) {
+            if (py::hasattr(value, method)) {
+                value.attr(method)(arg);
+            }
+        }
+        return;
+    }
+    if (py::hasattr(attn_pyobj, method)) {
+        attn_pyobj.attr(method)(arg);
+    }
+}
+
+static void invokeOnAttnImpl(const py::object& attn_pyobj,
+                             const char*        method,
+                             const py::object&  attn_inputs,
+                             const py::object&  graph_bs) {
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        for (auto value : attn_pyobj.attr("values")()) {
+            if (py::hasattr(value, method)) {
+                value.attr(method)(attn_inputs, graph_bs);
+            }
+        }
+        return;
+    }
+    if (py::hasattr(attn_pyobj, method)) {
+        attn_pyobj.attr(method)(attn_inputs, graph_bs);
+    }
+}
+
 void AscendGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("ascend graph replay start check for %s %d", key_type, key);
     // The captured FIA tasks contain ExternalEvent wait points that are
@@ -538,7 +585,7 @@ void AscendGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     // graph or the replay deadlocks on the wait point.
     try {
         auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-        attn_pyobj.attr("signal_graph_events")(py::int_(key));
+        invokeOnAttnImpl(attn_pyobj, "signal_graph_events", py::int_(key));
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_WARNING("signal_graph_events failed for %s %d: %s", key_type, key, e.what());
     }
@@ -741,8 +788,10 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         // Pass the captured graph batch size: the FIA graph-task update must
         // carry exactly as many context lengths as the graph instance was
         // captured with (padded request rows contribute ctx=1).
-        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs.attention_inputs,
-                                              py::int_(state.current_real_graph_bs));
+        invokeOnAttnImpl(attn_pyobj,
+                         "prepare_cuda_graph",
+                         py::cast(py_model_inputs.attention_inputs),
+                         py::int_(state.current_real_graph_bs));
     }
 }
 

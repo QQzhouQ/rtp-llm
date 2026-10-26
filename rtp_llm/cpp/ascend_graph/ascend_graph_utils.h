@@ -47,6 +47,7 @@ public:
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_seqlens_device       = inputs.attention_inputs.cu_seqlens_device;
+        py_model_inputs_.attention_inputs.combo_position_ids      = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.attention_inputs.cu_kv_seqlens_device           = inputs.attention_inputs.cu_kv_seqlens_device;
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
