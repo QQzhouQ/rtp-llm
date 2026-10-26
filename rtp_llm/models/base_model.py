@@ -170,7 +170,14 @@ class BaseModel(object):
         from rtp_llm.device.device_type import get_device_type, DeviceType
         dt = get_device_type()
         if dt == DeviceType.Ascend:
-            return f"npu:{self.parallelism_config.local_rank}"
+            # Use torch.npu.current_device() instead of local_rank: the current
+            # device reflects any ASCEND_RT_VISIBLE_DEVICES remapping done by
+            # CANN, keeping the device consistent with the HCCL communicator.
+            try:
+                import torch_npu  # noqa: F401
+                return f"npu:{torch.npu.current_device()}"
+            except ImportError:
+                return f"npu:{self.parallelism_config.local_rank}"
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")

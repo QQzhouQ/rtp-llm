@@ -380,6 +380,14 @@ def init_symm_mem_communicator(
         logging.info("TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR")
         _symm_mem_comm = None
         return None
+    from rtp_llm.device.device_type import get_device_type, DeviceType
+    if get_device_type() == DeviceType.Ascend:
+        # CUDA symmetric-memory communicator is not applicable on NPU (its
+        # buffers and device handles are torch.cuda-only); collective traffic
+        # stays on the HCCL process group. Consumers null-guard this handle.
+        logging.info("TorchSymmMemCommunicator disabled on Ascend (HCCL path)")
+        _symm_mem_comm = None
+        return None
     symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
     if symm_mem_comm.disabled:
         logging.warning("TorchSymmMemCommunicator is disabled, skipping initialization")
