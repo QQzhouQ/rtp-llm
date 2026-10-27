@@ -87,7 +87,7 @@ class AscendPrefillImpl(FMHAImplBase):
             )
         # Verify feeds a uniform num_tokens_per_bs (= K+1) per stream and the
         # TND layout is stream-major, so token t belongs to stream t // apsk.
-        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_d  # [B] == prefix + 1
+        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device  # [B] == prefix + 1
         num_streams = int(seq_plus_1.numel())
         tokens_per_stream = num_tokens // num_streams if num_streams > 0 else 0
 
@@ -149,7 +149,19 @@ class AscendPrefillImpl(FMHAImplBase):
 
     def forward(self, qkv, kv_cache, layer_idx=0):
         if self.need_rope_kv_cache:
-            self._update_rope_kv_write_params(qkv.device, kv_cache, qkv.shape[0], layer_idx)
+            # During aclgraph capture (target-verify, T=K+1 per stream) all
+            # host->device copies are illegal: derive positions/slot_mapping
+            # from the capture buffers with device ops instead.
+            if getattr(self.attn_inputs, "is_cuda_graph", False) and (
+                torch.npu.is_current_stream_capturing()
+            ):
+                kernel_page = kv_cache.seq_size_per_block if kv_cache is not None else 0
+                self.params.blocks_per_phys = _blocks_per_phys_from_config(
+                    self.attn_configs, self.attn_inputs)
+                self._update_rope_kv_write_params_device(
+                    qkv.device, kernel_page, qkv.shape[0])
+            else:
+                self._update_rope_kv_write_params(qkv.device, kv_cache, qkv.shape[0], layer_idx)
 
             if self.rope_impl is not None:
                 query, key, value = self.rope_impl.forward(qkv)
@@ -201,6 +213,7 @@ class AscendPrefillAttnOp:
 
     def __init__(self, attn_configs, attn_inputs):
         self.attn_configs = attn_configs
+        self.attn_inputs = attn_inputs
         self.num_heads = attn_configs.head_num
         self.num_kv_heads = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
@@ -221,6 +234,7 @@ class AscendPrefillAttnOp:
         self.params = params
 
     def prepare(self, attn_inputs):
+        self.attn_inputs = attn_inputs
         self.block_table = attn_inputs.kv_cache_kernel_block_id
         self.blocks_per_phys = _blocks_per_phys_from_config(self.attn_configs, attn_inputs)
         if getattr(attn_inputs, "is_cuda_graph", False):
@@ -232,7 +246,7 @@ class AscendPrefillAttnOp:
             self.actual_seq_q = None
             self.actual_seq_kv = None
             return
-        self.block_table = attn_inputs.kv_cache_kernel_block_id_host
+        self.block_table = attn_inputs.kv_cache_kernel_block_id
         if self.block_table is not None:
             self.block_table = self.block_table.clamp(min=0)
             if self.block_table.ndim != 2:
@@ -258,8 +272,10 @@ class AscendPrefillAttnOp:
         return [apsk * (i + 1) for i in range(num_streams)]
 
     def forward(self, q, kv_cache):
+        # attn_inputs may be unset before the first prepare() call (e.g. the
+        # MTP draft model's eager warmup forward); treat that as eager.
         if (
-            getattr(self.attn_inputs, "is_cuda_graph", False)
+            getattr(getattr(self, "attn_inputs", None), "is_cuda_graph", False)
             and torch.npu.is_current_stream_capturing()
         ):
             return self._forward_fia_graph(q, kv_cache)

@@ -902,11 +902,21 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                recovered.unsqueeze(1).expand({bs, K + 1}),
                                                neg_one));           // [bs, K+1]
 
+    // CUDA kernel parity (sampling.cu:302-312): the accepted count INCLUDES
+    // the bonus slot, and the bonus position carries the target sampler token
+    // (target_token_ids[b, K]) — this engine's consumers require
+    // accept_len >= 1 even when the first draft token is rejected.
+    auto token_stride   = params.target_token_ids_d.size(1);
+    auto target_bonus   = params.target_token_ids_d.reshape(
+        {bs, (K + 1), token_stride}).select(1, K).select(1, token_stride - 1).to(torch::kLong);  // [bs]
+    // Bonus slot semantics (CUDA sampling.cu:302-312): at the first rejected
+    // position the recovered token is used; at pos==K (all accepted) the
+    // target sampler's own token fills the final slot.
+    auto bonus_at_pos   = torch::where(pos.lt(K), recovered, target_bonus);  // [bs]
+    out_ids             = torch::where(at_pos, bonus_at_pos.unsqueeze(1).expand({bs, K + 1}), out_ids);
+
     params.output_token_ids_d.copy_(out_ids.to(params.output_token_ids_d.dtype()));
-    // accepted count = pos (draft tokens accepted); the CUDA kernel writes
-    // the same value here — callers that need emitted (pos+1) add the bonus
-    // separately after overriding the last slot.
-    params.output_accepted_token_num_d.copy_(pos.to(params.output_accepted_token_num_d.dtype()));
+    params.output_accepted_token_num_d.copy_((pos + 1).to(params.output_accepted_token_num_d.dtype()));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {

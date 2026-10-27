@@ -164,7 +164,7 @@ std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsPr
 
 void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
 #if USING_CUDA
-    if (tensor.defined() && tensor.is_cuda()) {
+    if (tensor.defined() && (tensor.is_cuda() || tensor.is_privateuseone())) {
         c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(),
                                                       at::cuda::getCurrentCUDAStream(tensor.device().index()));
     }
@@ -174,7 +174,7 @@ void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
 }
 
 torch::Tensor toCudaWithHostHold(const torch::Tensor& tensor, TensorHolder& holder) {
-    if (!tensor.defined() || tensor.is_cuda() || tensor.is_privateuseone()) {
+    if (!tensor.defined() || (tensor.is_cuda() || tensor.is_privateuseone()) || tensor.is_privateuseone()) {
         return tensor;
     }
     if (tensor.numel() == 0) {
@@ -189,7 +189,7 @@ torch::Tensor toCudaInt32WithHostHold(const torch::Tensor& tensor, TensorHolder&
         return tensor;
     }
     auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
-    if ((tensor.is_cuda() || tensor.is_privateuseone()) && tensor.scalar_type() == torch::kInt32) {
+    if (((tensor.is_cuda() || tensor.is_privateuseone()) || tensor.is_privateuseone()) && tensor.scalar_type() == torch::kInt32) {
         return tensor;
     }
     if (tensor.numel() == 0) {
@@ -214,7 +214,7 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     if (!cap_src.defined()) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && (output.accept_len.is_cuda() || output.accept_len.is_privateuseone()),
                             "spec logits cap requires CUDA accept_len");
 
     if (verify_result.ready_event) {
@@ -225,12 +225,12 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     auto cap_plus_one = cap_gpu + 1;
     output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
 
-    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && output.accept_tokens.is_cuda(),
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && (output.accept_tokens.is_cuda() || output.accept_tokens.is_privateuseone()),
                             "spec logits cap requires CUDA accept_tokens");
     RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
                             "spec logits cap requires target sampler token_ids");
     auto target_token_ids = target_sampler_output.token_ids;
-    if (!target_token_ids.is_cuda()) {
+    if (!(target_token_ids.is_cuda() || target_token_ids.is_privateuseone())) {
         target_token_ids = target_token_ids.to(output.accept_tokens.device(), /*non_blocking=*/true);
     }
     const int64_t token_stride  = target_token_ids.size(1);
@@ -263,7 +263,7 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 }  // namespace
 
 torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
-    if (!tensor.defined() || tensor.is_cuda()) {
+    if (!tensor.defined() || (tensor.is_cuda() || tensor.is_privateuseone())) {
         return tensor;
     }
     return toCudaWithHostHold(tensor.clone().pin_memory(), holder);
@@ -400,21 +400,21 @@ void MtpExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const cha
     }
 
     auto to_cuda = [this, tag](torch::Tensor& tensor, const char* name) {
-        if (!tensor.defined() || tensor.is_cuda()) {
+        if (!tensor.defined() || (tensor.is_cuda() || tensor.is_privateuseone())) {
             return;
         }
         if (tensor.numel() == 0) {
-            tensor = torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
+            tensor = torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(getTorchCudaDevice()));
             return;
         }
         if (!tensor.is_pinned()) {
             RTP_LLM_LOG_WARNING(
                 "[mtp-device-input] %s.%s is CPU but not pinned; H2D falls back to blocking copy", tag, name);
-            tensor = tensor.to(torch::kCUDA);
+            tensor = tensor.to(getTorchCudaDevice());
             return;
         }
         buffer_holder_.hold_host(tensor);
-        tensor = tensor.to(torch::kCUDA, /*non_blocking=*/true);
+        tensor = tensor.to(getTorchCudaDevice(), /*non_blocking=*/true);
     };
 
     to_cuda(model_input.combo_tokens, "combo_tokens");
@@ -441,7 +441,7 @@ void MtpExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, cons
         if (!tensor.defined()) {
             return;
         }
-        RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(),
+        RTP_LLM_CHECK_WITH_INFO((tensor.is_cuda() || tensor.is_privateuseone()),
                                 "[mtp-device-input] %s.%s expected CUDA tensor, got device=%s numel=%ld",
                                 tag,
                                 name,
@@ -517,7 +517,9 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * propose_step_);
     metrics_accept_len_row_priorities_    = std::move(row_priorities);
 
-    if (!accept_len.is_cuda()) {
+    // NPU tensors report is_cuda() == false; treat any accelerator-resident
+    // tensor as device-side (a CPU pin here crashes: "cannot pin 'npuLongType'").
+    if (!(accept_len.is_cuda() || accept_len.is_privateuseone()) && !accept_len.is_privateuseone()) {
         metrics_accept_len_sum_gpu_  = torch::Tensor();
         metrics_accept_len_sum_cpu_  = accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
         metrics_accept_len_rows_gpu_ = torch::Tensor();
@@ -651,7 +653,7 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto seq_len = fake_stream->seqLength();
 
     // set device state
-    auto int32_gpu          = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto int32_gpu          = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     auto accept_len_gpu     = torch::ones({1}, int32_gpu);
     auto accept_tokens_gpu  = torch::zeros({1, max_new_tokens + 1}, int32_gpu);
     auto next_seq_len_gpu   = torch::ones({1}, int32_gpu) + 1;
@@ -790,7 +792,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     parallelism_config_ = params.parallelism_config;
     if (is_dspark_ && parallelism_config_.tp_size > 1) {
         dspark_cache_store_status_ =
-            torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
     }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
@@ -1021,7 +1023,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.defined() && dspark_markov_w2_.defined(),
                                 "DSpARK requires markov_w1 and markov_w2 weights");
         const int64_t padded_draft_vocab_size = (static_cast<int64_t>(draft_vocab_size_) + 127) / 128 * 128;
-        RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.is_cuda() && dspark_markov_w2_.is_cuda()
+        RTP_LLM_CHECK_WITH_INFO((dspark_markov_w1_.is_cuda() || dspark_markov_w1_.is_privateuseone()) && (dspark_markov_w2_.is_cuda() || dspark_markov_w2_.is_privateuseone())
                                     && dspark_markov_w1_.dim() == 2 && dspark_markov_w2_.dim() == 2
                                     && dspark_markov_w1_.size(1) == dspark_markov_w2_.size(1)
                                     && dspark_markov_w1_.size(0) >= static_cast<int64_t>(vocab_size_)
@@ -1032,7 +1034,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "[draft_vocab,rank] tensors with matching rank and dtype");
         dspark_markov_w2_ = dspark_markov_w2_.narrow(0, 0, static_cast<int64_t>(draft_vocab_size_));
         if (draft_vocab_size_ != vocab_size_) {
-            RTP_LLM_CHECK_WITH_INFO(d2t_map_.defined() && d2t_map_.is_cuda() && d2t_map_.dim() == 1
+            RTP_LLM_CHECK_WITH_INFO(d2t_map_.defined() && (d2t_map_.is_cuda() || d2t_map_.is_privateuseone()) && d2t_map_.dim() == 1
                                         && d2t_map_.scalar_type() == torch::kInt64
                                         && d2t_map_.numel() == static_cast<int64_t>(draft_vocab_size_),
                                     "reduced-vocabulary DSpARK requires a CUDA int64 d2t map with one entry per "
@@ -1429,7 +1431,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         if (!tensor.defined()) {
             return tensor;
         }
-        if (tensor.is_cuda() || tensor.is_privateuseone()) {
+        if ((tensor.is_cuda() || tensor.is_privateuseone()) || tensor.is_privateuseone()) {
             return tensor;
         }
         if (tensor.numel() == 0) {
@@ -1761,7 +1763,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             prev_bookkeeping_synced_for_spec_logits = true;
         }
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
-        if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.is_cuda()) {
+        if (draft_sampler_output.token_ids.defined() && (draft_sampler_output.token_ids.is_cuda() || draft_sampler_output.token_ids.is_privateuseone())) {
             draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
             cuda_graph::graphRecordEvent(*draft_tokens_ready_event, cuda_graph::graphGetCurrentStream());
         }
@@ -1796,9 +1798,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
         if (model_input.is_fake_stream) {
             speculative_sampler_output.accept_len = torch::full(
-                {1}, (int64_t)(propose_step_ + 1), torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                {1}, (int64_t)(propose_step_ + 1), torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
             speculative_sampler_output.accept_tokens = torch::zeros(
-                {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
         } else {
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
@@ -1852,7 +1854,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_input, model_output.all_hidden_states, batch_size);
         } else {
             model_input.is_target_verify   = false;
-            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
             model_input.lm_output_indexes  = torch::empty({(int64_t)batch_size}, cuda_i32);
             model_input.last_hidden_states = model_output.all_hidden_states;
         }
@@ -1980,7 +1982,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     }
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
         // Async prepare only needs the token count for metadata/cudagraph sizing.
         // The actual target-verify token ids are produced by the draft decode
         // path below.
@@ -1997,7 +1999,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         }
 #if USING_CUDA
         const bool can_fuse_target_prepare =
-            target_prefix_lengths_for_prepare.defined() && target_prefix_lengths_for_prepare.is_cuda()
+            target_prefix_lengths_for_prepare.defined() && (target_prefix_lengths_for_prepare.is_cuda() || target_prefix_lengths_for_prepare.is_privateuseone())
             && target_prefix_lengths_for_prepare.scalar_type() == torch::kInt32
             && target_prefix_lengths_for_prepare.is_contiguous()
             && target_prefix_lengths_for_prepare.numel() >= static_cast<int64_t>(batch_size);
@@ -2033,7 +2035,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     }
     model_input_copy.last_hidden_states = torch::Tensor();
     model_input_copy.sequence_lengths =
-        torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
     model_input_copy.is_target_verify = true;
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
@@ -2593,7 +2595,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 #if USING_ASCEND
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kPrivateUse1);
 #else
-    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
 #endif
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
         auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);
@@ -2634,8 +2636,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                 const auto  state         = stream->getMtpAsyncDeviceState();
                 const auto& accept_tokens = state.accept_tokens_gpu;
                 const auto& accept_len    = state.accept_len_gpu;
-                if (!accept_tokens.defined() || !accept_tokens.is_cuda() || !accept_len.defined()
-                    || !accept_len.is_cuda()) {
+                if (!accept_tokens.defined() || !(accept_tokens.is_cuda() || accept_tokens.is_privateuseone()) || !accept_len.defined()
+                    || !(accept_len.is_cuda() || accept_len.is_privateuseone())) {
                     all_device_state = false;
                     break;
                 }
@@ -2653,7 +2655,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
         if (!all_device_state && all_streams.empty()) {
             pre_target_token_t =
-                torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
         }
     }
 
@@ -2814,7 +2816,7 @@ torch::Tensor MtpExecutor::advanceDSparkPositionIds(const torch::Tensor& verify_
     }
     RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && verify_width > 0,
                             "DSpARK position advance requires positive batch and verify width");
-    RTP_LLM_CHECK_WITH_INFO(verify_position_ids.is_cuda() && accept_len.is_cuda(),
+    RTP_LLM_CHECK_WITH_INFO((verify_position_ids.is_cuda() || verify_position_ids.is_privateuseone()) && (accept_len.is_cuda() || accept_len.is_privateuseone()),
                             "DSpARK position advance requires CUDA tensors");
     RTP_LLM_CHECK_WITH_INFO(verify_position_ids.scalar_type() == torch::kInt32,
                             "DSpARK verify positions must be int32");
@@ -2869,7 +2871,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
     // Batch compute next_seq_len from host seqLength (sync path: host is authoritative)
     const auto pin_i32          = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
     auto       next_seq_len_cpu = torch::empty({batch_size}, pin_i32);
     {
         int64_t i = 0;
@@ -2953,8 +2955,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     // --- Batch-level ops ---
 
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    const auto cuda_i64 = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+    const auto cuda_i64 = torch::TensorOptions().dtype(torch::kInt64).device(getTorchCudaDevice());
 
     torch::Tensor prev_seq_len_all;
     torch::Tensor next_seq_len_all;
@@ -2966,7 +2968,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         prev_slices.reserve(batch_size);
         for (const auto& stream : all_streams) {
             const auto& gpu_val = stream->getNextSeqLenGpu();
-            if (gpu_val.defined() && gpu_val.is_cuda()) {
+            if (gpu_val.defined() && (gpu_val.is_cuda() || gpu_val.is_privateuseone())) {
                 prev_slices.push_back(gpu_val.reshape({1}));
             } else {
                 prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
@@ -3013,8 +3015,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
-    if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
-        && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
+    if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && (kv_cache_block_id.is_cuda() || kv_cache_block_id.is_privateuseone())
+        && kv_cache_kernel_block_id.defined() && (kv_cache_kernel_block_id.is_cuda() || kv_cache_kernel_block_id.is_privateuseone())) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
                                 "MTP physical cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
